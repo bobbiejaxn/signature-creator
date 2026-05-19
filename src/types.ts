@@ -38,8 +38,8 @@ export interface CustomField {
   type: 'text' | 'link';
 }
 
-export type TemplateName = 'modern' | 'classic' | 'minimal' | 'professional' | 'creative' | 'compact';
-export type AccentColor = 'blue' | 'green' | 'orange' | 'red' | 'purple' | 'cyan' | 'lime' | 'amber';
+export type TemplateName = 'modern' | 'classic' | 'minimal' | 'professional' | 'creative' | 'compact' | 'bold' | 'elegant' | 'corporate' | 'divider' | 'stacked' | 'boxed';
+export type AccentColor = 'blue' | 'green' | 'orange' | 'red' | 'purple' | 'cyan' | 'lime' | 'amber' | 'pink' | 'indigo' | 'teal' | 'rose' | 'slate' | 'emerald' | 'violet' | 'fuchsia';
 export type FontName = 'Arial' | 'Helvetica' | 'Georgia' | 'Times New Roman' | 'Verdana' | 'Tahoma' | 'Trebuchet MS' | 'Courier New';
 
 export interface SignatureStyle {
@@ -63,6 +63,14 @@ export const ACCENT_COLORS: Record<AccentColor, string> = {
   cyan: '#06b6d4',
   lime: '#84cc16',
   amber: '#f59e0b',
+  pink: '#ec4899',
+  indigo: '#6366f1',
+  teal: '#14b8a6',
+  rose: '#f43f5e',
+  slate: '#475569',
+  emerald: '#10b981',
+  violet: '#8b5cf6',
+  fuchsia: '#d946ef',
 };
 
 export const EMAIL_FONTS: FontName[] = [
@@ -71,8 +79,24 @@ export const EMAIL_FONTS: FontName[] = [
 ];
 
 export const TEMPLATES: TemplateName[] = [
-  'modern', 'classic', 'minimal', 'professional', 'creative', 'compact'
+  'modern', 'classic', 'minimal', 'professional', 'creative', 'compact',
+  'bold', 'elegant', 'corporate', 'divider', 'stacked', 'boxed'
 ];
+
+export const TEMPLATE_LABELS: Record<TemplateName, { name: string; desc: string }> = {
+  modern: { name: 'Modern', desc: 'Clean with accent divider' },
+  classic: { name: 'Classic', desc: 'Left border accent bar' },
+  minimal: { name: 'Minimal', desc: 'Just the essentials' },
+  professional: { name: 'Professional', desc: 'Bold name, accent line' },
+  creative: { name: 'Creative', desc: 'Color accent sidebar' },
+  compact: { name: 'Compact', desc: 'One-liner style' },
+  bold: { name: 'Bold', desc: 'Strong header bar' },
+  elegant: { name: 'Elegant', desc: 'Refined thin rules' },
+  corporate: { name: 'Corporate', desc: 'Structured 2-column' },
+  divider: { name: 'Divider', desc: 'Rule separators' },
+  stacked: { name: 'Stacked', desc: 'Centered vertical' },
+  boxed: { name: 'Boxed', desc: 'Card with accent top' },
+};
 
 export const DEFAULT_SIGNATURE: SignatureData = {
   fullName: '',
@@ -98,7 +122,7 @@ export const DEFAULT_SIGNATURE: SignatureData = {
 
 export const DEFAULT_STYLE: SignatureStyle = {
   template: 'modern',
-  accentColor: 'blue',
+  accentColor: 'slate',
   font: 'Arial',
   fontSize: 14,
   includeQR: false,

@@ -1,1 +1,82 @@
 @import "tailwindcss";
+
+@theme {
+  --font-sans: "Geist", "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", monospace;
+  
+  /* debored.ai accent palette — monochrome */
+  --color-accent-50: oklch(0.985 0 0);
+  --color-accent-100: oklch(0.960 0 0);
+  --color-accent-200: oklch(0.890 0 0);
+  --color-accent-300: oklch(0.780 0 0);
+  --color-accent-400: oklch(0.620 0 0);
+  --color-accent-500: oklch(0.480 0 0);
+  --color-accent-600: oklch(0.350 0 0);
+  --color-accent-700: oklch(0.260 0 0);
+  --color-accent-800: oklch(0.190 0 0);
+  --color-accent-900: oklch(0.140 0 0);
+  --color-accent-950: oklch(0.090 0 0);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Geist", "Inter", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Mobile-first responsive layout */
+@media (max-width: 768px) {
+  .sig-layout {
+    flex-direction: column !important;
+  }
+  .sig-sidebar {
+    width: 100% !important;
+    max-height: none !important;
+  }
+  .sig-preview-area {
+    padding-bottom: 80px; /* space for sticky bottom bar */
+  }
+}
+
+/* Sticky bottom bar on mobile */
+@media (max-width: 768px) {
+  .sig-bottom-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 50;
+    background: white;
+    border-top: 1px solid oklch(0.890 0 0);
+    padding: 12px 16px;
+  }
+}
+
+/* Smooth input focus transitions */
+input, select, textarea {
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+input:focus, select:focus, textarea:focus {
+  border-color: oklch(0.350 0 0) !important;
+  box-shadow: 0 0 0 2px oklch(0.350 0 0 / 0.15);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: oklch(0.890 0 0);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.780 0 0);
+}

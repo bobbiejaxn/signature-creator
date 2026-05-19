@@ -10,8 +10,8 @@ services:
       - traefik.http.routers.signature-creator.tls.certresolver=letsencrypt
       - traefik.http.services.signature-creator.loadbalancer.server.port=8080
     networks:
-      - proxy
+      - proxy-network
 
 networks:
-  proxy:
+  proxy-network:
     external: true
