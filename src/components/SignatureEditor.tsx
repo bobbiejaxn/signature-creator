@@ -1,10 +1,11 @@
 import { useState, useCallback, useRef } from 'react';
-import type { SignatureData, SignatureStyle, CustomField } from '../types';
-import { DEFAULT_SIGNATURE, DEFAULT_STYLE, ACCENT_COLORS, EMAIL_FONTS, TEMPLATES, TEMPLATE_LABELS } from '../types';
+import type { SignatureData, SignatureStyle, CustomField, PreviewMode, DevicePreview } from '../types';
+import { DEFAULT_SIGNATURE, DEFAULT_STYLE, ACCENT_COLORS, EMAIL_FONTS, TEMPLATES, TEMPLATE_LABELS, SOCIAL_ICON_STYLES, SEPARATOR_STYLES, CTA_STYLES } from '../types';
 import { SignaturePreview } from './SignaturePreview';
 import { toPng } from 'html-to-image';
-import { Mail, Phone, Smartphone, Globe, MapPin, Link, Plus, Trash2, Upload, Download, Image, QrCode, ChevronRight, ChevronLeft, Eye, Code, User, Building2, Palette, Copy, Check, FileText, MessageCircle } from 'lucide-react';
+import { Mail, Phone, Smartphone, Globe, MapPin, Link, Plus, Trash2, Upload, Download, Image, QrCode, ChevronRight, ChevronLeft, Eye, Code, User, Building2, Palette, Copy, Check, FileText, MessageCircle, Sun, Moon, Monitor, Tablet, Camera } from 'lucide-react';
 import { phoneFormatHint } from '../utils/phone';
+import { extractBrandColor } from '../utils/brand-colors';
 
 type Step = 'details' | 'images' | 'social' | 'template' | 'design';
 const STEPS: Step[] = ['details', 'images', 'social', 'template', 'design'];
@@ -30,13 +31,16 @@ export function SignatureEditor() {
   const [copied, setCopied] = useState<string | null>(null);
   const [exportMode, setExportMode] = useState<'visual' | 'html'>('visual');
   const [showHowTo, setShowHowTo] = useState(false);
+  const [previewMode, setPreviewMode] = useState<PreviewMode>('light');
+  const [devicePreview, setDevicePreview] = useState<DevicePreview>('desktop');
+  const [brandColorDetected, setBrandColorDetected] = useState<string | null>(null);
   const previewRef = useRef<HTMLDivElement>(null);
 
   const updateData = (field: keyof SignatureData, value: string | SignatureData['customFields']) => {
     setData(prev => ({ ...prev, [field]: value }));
   };
 
-  const updateStyle = (field: keyof SignatureStyle, value: string | number | boolean) => {
+  const updateStyle = (field: keyof SignatureStyle, value: string | number | boolean | null) => {
     setStyle(prev => ({ ...prev, [field]: value }));
   };
 
@@ -77,7 +81,14 @@ export function SignatureEditor() {
           canvas.height = h;
           const ctx = canvas.getContext('2d')!;
           ctx.drawImage(img, 0, 0, w, h);
-          setData(prev => ({ ...prev, [field]: canvas.toDataURL('image/jpeg', 0.8) }));
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+          setData(prev => ({ ...prev, [field]: dataUrl }));
+          // Extract brand color from logo
+          if (field === 'companyLogo') {
+            extractBrandColor(dataUrl).then(color => {
+              if (color) setBrandColorDetected(color);
+            });
+          }
         };
         img.src = result;
       };
@@ -307,6 +318,75 @@ export function SignatureEditor() {
         <input type="checkbox" checked={style.showLogo} onChange={e => updateStyle('showLogo', e.target.checked)} className="rounded border-accent-300 text-accent-900" />
         Firmenlogo anzeigen
       </label>
+
+      {brandColorDetected && (
+        <div className="mt-4 p-3 bg-accent-50 rounded-lg border border-accent-200">
+          <p className="text-xs text-accent-600 mb-2">Farbe aus Logo erkannt:</p>
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded" style={{ backgroundColor: brandColorDetected }} />
+            <span className="text-sm font-mono text-accent-800">{brandColorDetected}</span>
+            <button onClick={() => { updateStyle('customAccentHex', brandColorDetected); }}
+              className="ml-2 px-2 py-1 text-xs bg-accent-900 text-white rounded hover:bg-accent-800">
+              Als Akzentfarbe
+            </button>
+          </div>
+        </div>
+      )}
+
+      <h3 className="text-xs font-semibold text-accent-500 uppercase tracking-wider mt-6">Werbebanner</h3>
+      <div className="flex items-center gap-4">
+        {data.bannerImage ? (
+          <div className="relative">
+            <img src={data.bannerImage} alt="Banner" className="h-10 object-contain rounded" />
+            <button onClick={() => updateData('bannerImage', '')}
+              className="absolute -top-1 -right-1 w-5 h-5 bg-accent-900 text-white rounded-full flex items-center justify-center text-xs hover:bg-red-600 transition-colors">&times;</button>
+          </div>
+        ) : (
+          <div className="w-24 h-10 bg-accent-100 border-2 border-dashed border-accent-300 flex items-center justify-center rounded">
+            <Camera size={20} className="text-accent-400" />
+          </div>
+        )}
+        <button onClick={() => {
+          const input = document.createElement('input');
+          input.type = 'file'; input.accept = 'image/*';
+          input.onchange = (e) => {
+            const file = (e.target as HTMLInputElement).files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (re) => {
+              const result = re.target?.result as string;
+              const img = new window.Image();
+              img.onload = () => {
+                let w = img.width, h = img.height;
+                if (w > 500) { const ratio = 500 / w; w = 500; h = Math.round(h * ratio); }
+                const canvas = document.createElement('canvas');
+                canvas.width = w; canvas.height = h;
+                canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
+                setData(prev => ({ ...prev, bannerImage: canvas.toDataURL('image/jpeg', 0.8) }));
+              };
+              img.src = result;
+            };
+            reader.readAsDataURL(file);
+          };
+          input.click();
+        }}
+          className="flex items-center gap-2 px-4 py-2 bg-accent-900 text-white rounded-lg hover:bg-accent-800 transition-colors text-sm font-medium">
+          <Upload size={14} /> Hochladen
+        </button>
+      </div>
+      {data.bannerImage && (
+        <div className="space-y-2 mt-2">
+          <div>
+            <label className="text-xs text-accent-500">Banner-Link</label>
+            <input type="url" value={data.bannerUrl || ''} onChange={e => updateData('bannerUrl', e.target.value)}
+              className="w-full px-3 py-2 border border-accent-200 rounded-lg text-sm" placeholder="https://..." />
+          </div>
+          <label className="flex items-center gap-2 text-sm text-accent-600 cursor-pointer">
+            <input type="checkbox" checked={style.showBanner} onChange={e => updateStyle('showBanner', e.target.checked)} className="rounded border-accent-300 text-accent-900" />
+            Banner anzeigen
+          </label>
+        </div>
+      )}
     </div>
   );
 
@@ -339,6 +419,38 @@ export function SignatureEditor() {
           <input type="url" value={style.qrUrl} onChange={e => updateStyle('qrUrl', e.target.value)}
             placeholder="https://ihre-website.de oder vCard-Link" className={inputClass} />
           <p className="text-xs text-accent-400 mt-1">Link zu Website, Buchungskalender oder digitaler Visitenkarte</p>
+        </div>
+      )}
+
+      <h3 className="text-xs font-semibold text-accent-500 uppercase tracking-wider mt-6"><MessageCircle size={11} className="inline mr-1" />Call-to-Action Button</h3>
+      <label className="flex items-center gap-2 text-sm text-accent-600 cursor-pointer">
+        <input type="checkbox" checked={style.showCta} onChange={e => updateStyle('showCta', e.target.checked)} className="rounded border-accent-300 text-accent-900" />
+        CTA-Button anzeigen
+      </label>
+      {style.showCta && (
+        <div className="space-y-2 mt-2">
+          <div>
+            <label className={labelClass}>Button-Text</label>
+            <input type="text" value={data.ctaLabel} onChange={e => updateData('ctaLabel', e.target.value)}
+              placeholder="Termin buchen" className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Button-Link</label>
+            <input type="url" value={data.ctaUrl} onChange={e => updateData('ctaUrl', e.target.value)}
+              placeholder="https://calendly.com/ihre-terminbuchung" className={inputClass} />
+            <p className="text-xs text-accent-400 mt-1">Calendly, Cal.com, oder beliebige URL</p>
+          </div>
+          <div>
+            <label className={labelClass}>Button-Stil</label>
+            <div className="flex gap-2 mt-1">
+              {CTA_STYLES.map(s => (
+                <button key={s.key} onClick={() => updateStyle('ctaStyle', s.key)}
+                  className={`px-3 py-1.5 text-xs rounded-lg border transition-all ${
+                    style.ctaStyle === s.key ? 'border-accent-900 bg-accent-900 text-white' : 'border-accent-200 bg-white text-accent-600 hover:border-accent-400'
+                  }`}>{s.label}</button>
+              ))}
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -424,6 +536,39 @@ export function SignatureEditor() {
           </button>
         ))}
       </div>
+
+      <h3 className="text-xs font-semibold text-accent-500 uppercase tracking-wider mt-6">Social-Icon-Stil</h3>
+      <div className="flex flex-wrap gap-2">
+        {SOCIAL_ICON_STYLES.map(s => (
+          <button key={s.key} onClick={() => updateStyle('socialIconStyle', s.key)}
+            className={`px-3 py-1.5 text-xs rounded-lg border transition-all ${
+              style.socialIconStyle === s.key ? 'border-accent-900 bg-accent-900 text-white' : 'border-accent-200 bg-white text-accent-600 hover:border-accent-400'
+            }`}>{s.desc}</button>
+        ))}
+      </div>
+
+      <h3 className="text-xs font-semibold text-accent-500 uppercase tracking-wider mt-6">Trennlinie</h3>
+      <div className="flex flex-wrap gap-2">
+        {SEPARATOR_STYLES.map(s => (
+          <button key={s.key} onClick={() => updateStyle('separatorStyle', s.key)}
+            className={`px-3 py-1.5 text-xs rounded-lg border transition-all ${
+              style.separatorStyle === s.key ? 'border-accent-900 bg-accent-900 text-white' : 'border-accent-200 bg-white text-accent-600 hover:border-accent-400'
+            }`}>{s.label}</button>
+        ))}
+      </div>
+
+      {style.customAccentHex && (
+        <div className="mt-4 p-3 bg-accent-50 rounded-lg border border-accent-200">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-4 rounded" style={{ backgroundColor: style.customAccentHex }} />
+              <span className="text-xs text-accent-600">Eigene Akzentfarbe: {style.customAccentHex}</span>
+            </div>
+            <button onClick={() => updateStyle('customAccentHex', null)}
+              className="text-xs text-red-500 hover:text-red-700">Entfernen</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -541,11 +686,35 @@ export function SignatureEditor() {
               </div>
             </div>
 
+            {/* Device + Dark Mode controls */}
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex gap-1.5">
+                {([
+                  { key: 'desktop' as DevicePreview, icon: <Monitor size={14} /> },
+                  { key: 'tablet' as DevicePreview, icon: <Tablet size={14} /> },
+                  { key: 'phone' as DevicePreview, icon: <Smartphone size={14} /> },
+                ]).map(d => (
+                  <button key={d.key} onClick={() => setDevicePreview(d.key)}
+                    className={"p-1.5 rounded-lg transition-colors " + (
+                      devicePreview === d.key ? 'bg-accent-900 text-white' : 'text-accent-400 hover:bg-accent-100'
+                    )}>{d.icon}</button>
+                ))}
+              </div>
+              <button onClick={() => setPreviewMode(previewMode === 'light' ? 'dark' : 'light')}
+                className={"p-1.5 rounded-lg transition-colors " + (
+                  previewMode === 'dark' ? 'bg-accent-900 text-white' : 'text-accent-400 hover:bg-accent-100'
+                )}>
+                {previewMode === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
+              </button>
+            </div>
+
             {exportMode === 'visual' ? (
-              <div className="border border-accent-100 rounded-lg p-6 bg-white min-h-[200px] overflow-x-auto">
+              <div className={`border border-accent-100 rounded-lg p-6 min-h-[200px] overflow-x-auto ${
+                previewMode === 'dark' ? 'bg-accent-900' : 'bg-white'
+              }`}>
                 {data.fullName ? (
                   <div id="signature-preview" ref={previewRef}>
-                    <SignaturePreview data={data} style={style} />
+                    <SignaturePreview data={data} style={style} previewMode={previewMode} devicePreview={devicePreview} />
                   </div>
                 ) : (
                   <div className="flex items-center justify-center h-40 text-accent-400 text-sm">

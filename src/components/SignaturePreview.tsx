@@ -1,16 +1,19 @@
 import React from 'react';
-import type { SignatureData, SignatureStyle } from '../types';
+import type { SignatureData, SignatureStyle, PreviewMode, DevicePreview } from '../types';
 import { ACCENT_COLORS } from '../types';
 import { QRCodeSVG } from 'qrcode.react';
 import { sanitizePhoneE164, phoneLinkE164 } from '../utils/phone';
+import { getSocialIconHtml } from '../utils/social-icons';
 
 interface Props {
   data: SignatureData;
   style: SignatureStyle;
+  previewMode?: PreviewMode;
+  devicePreview?: DevicePreview;
 }
 
-export function SignaturePreview({ data, style }: Props) {
-  const accent = ACCENT_COLORS[style.accentColor];
+export function SignaturePreview({ data, style, previewMode = 'light', devicePreview = 'desktop' }: Props) {
+  const accent = style.customAccentHex || ACCENT_COLORS[style.accentColor];
   const font = style.font;
   const size = style.fontSize;
   const sm = size - 2;
@@ -26,6 +29,7 @@ export function SignaturePreview({ data, style }: Props) {
 
   const renderSocialLinks = (sep: string = ' · ') => (
     <>
+      {style.separatorStyle === 'pipe' && socials.length > 0 && renderSeparator(1)}
       {socials.map((s, i) => (
         <span key={s.label}>
           {i > 0 && <span style={{ color: '#cccccc' }}>{sep}</span>}
@@ -79,6 +83,118 @@ export function SignaturePreview({ data, style }: Props) {
       )}
     </>
   );
+
+  const renderSocialIcons = () => {
+    const platforms: ('linkedin' | 'twitter' | 'instagram' | 'facebook')[] = [];
+    if (data.linkedin) platforms.push('linkedin');
+    if (data.twitter) platforms.push('twitter');
+    if (data.instagram) platforms.push('instagram');
+    if (data.facebook) platforms.push('facebook');
+    if (platforms.length === 0) return null;
+
+    const iconSize = Math.max(sm, 16);
+    return (
+      <tr>
+        <td style={{ paddingTop: '8px' }}>
+          {platforms.map((p) => (
+            <span key={p} dangerouslySetInnerHTML={{
+              __html: getSocialIconHtml(
+                p,
+                p === 'linkedin' ? data.linkedin : p === 'twitter' ? data.twitter : p === 'instagram' ? data.instagram : data.facebook,
+                style.socialIconStyle,
+                accent,
+                iconSize
+              )
+            }} />
+          ))}
+        </td>
+      </tr>
+    );
+  };
+
+  const renderSeparator = (cols: number = 1) => {
+    const sep = style.separatorStyle;
+    if (sep === 'none') return null;
+    const s = sep === 'line' ? `1px solid #e5e5e5`
+      : sep === 'dashed' ? `1px dashed #d4d4d4`
+      : sep === 'pipe' ? undefined
+      : sep === 'accent' ? `2px solid ${accent}`
+      : sep === 'gradient' ? undefined
+      : `1px solid #e5e5e5`;
+    if (sep === 'pipe') return (<tr><td colSpan={cols} style={{ padding: '6px 0' }}>{renderContactPipe()}</td></tr>);
+    if (sep === 'gradient') {
+      return (
+        <tr>
+          <td colSpan={cols} style={{ padding: '6px 0' }}>
+            <table width="100%" cellPadding={0} cellSpacing={0} style={{ borderCollapse: 'collapse' }}>
+              <tr>
+                <td width="60%" style={{ borderBottom: `1px solid ${accent}` }} />
+                <td width="40%" style={{ borderBottom: '1px solid transparent' }} />
+              </tr>
+            </table>
+          </td>
+        </tr>
+      );
+    }
+    return (
+      <tr>
+        <td colSpan={cols} style={{ borderBottom: s, padding: '6px 0' }} />
+      </tr>
+    );
+  };
+
+  const renderContactPipe = () => {
+    const parts: string[] = [];
+    if (data.phone) parts.push(fmtPhone(data.phone));
+    if (data.mobile) parts.push(fmtPhone(data.mobile));
+    if (data.email) parts.push(data.email);
+    if (data.website) parts.push(data.website);
+    return <span style={{ color: '#666666', fontSize: `${sm}px` }}>{parts.join(' | ')}</span>;
+  };
+
+  const renderCta = () => {
+    if (!style.showCta || !data.ctaUrl) return null;
+    const isMinimal = style.ctaStyle === 'minimal';
+    const borderRadius = style.ctaStyle === 'pill' ? '50px' : style.ctaStyle === 'rounded' ? '6px' : '0';
+    return (
+      <tr>
+        <td style={{ paddingTop: '10px' }}>
+          <table cellPadding={0} cellSpacing={0} style={{ borderCollapse: 'collapse' }}>
+            <tr>
+              <td style={{
+                backgroundColor: isMinimal ? 'transparent' : accent,
+                borderRadius,
+                padding: isMinimal ? '4px 0' : '8px 20px',
+              }}>
+                <a href={data.ctaUrl} target="_blank" rel="noopener" style={{
+                  color: isMinimal ? accent : '#ffffff',
+                  textDecoration: isMinimal ? 'underline' : 'none',
+                  fontSize: `${sm}px`,
+                  fontWeight: 600,
+                  display: 'inline-block',
+                }}>
+                  {data.ctaLabel || 'Termin buchen'}
+                </a>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    );
+  };
+
+  const renderBanner = () => {
+    if (!style.showBanner || !data.bannerImage) return null;
+    return (
+      <tr>
+        <td style={{ paddingTop: '12px' }}>
+          <a href={data.bannerUrl || '#'} target="_blank" rel="noopener" style={{ textDecoration: 'none' }}>
+            <img src={data.bannerImage} alt={data.bannerAlt || 'Banner'} style={{ maxWidth: '500px', width: '100%', height: 'auto', display: 'block' }} />
+          </a>
+        </td>
+      </tr>
+    );
+  };
 
   const renderContactSingleLine = () => {
     const parts: string[] = [];
@@ -680,9 +796,43 @@ export function SignaturePreview({ data, style }: Props) {
     boxed: renderBoxed,
   };
 
+  const isDark = previewMode === 'dark';
+  const bg = isDark ? '#1a1a1a' : '#ffffff';
+  const textCol = isDark ? '#e5e5e5' : '#000000';
+  const borderCol = isDark ? '#333333' : '#e5e7eb';
+
+  const maxW = devicePreview === 'phone' ? '375px' : devicePreview === 'tablet' ? '768px' : undefined;
+
   return (
-    <div style={{ backgroundColor: '#ffffff', padding: '16px', borderRadius: '8px', border: '1px solid #e5e7eb', minWidth: '400px' }}>
-      {(templateMap[style.template] || renderModern)()}
+    <div style={{
+      backgroundColor: bg,
+      padding: devicePreview === 'phone' ? '12px' : '16px',
+      borderRadius: devicePreview === 'phone' ? '24px' : '8px',
+      border: devicePreview === 'phone' ? `3px solid ${borderCol}` : `1px solid ${borderCol}`,
+      minWidth: devicePreview === 'phone' ? '300px' : '400px',
+      maxWidth: maxW,
+      margin: maxW ? '0 auto' : undefined,
+      color: textCol,
+    }}>
+      <div id="signature-preview-content">
+        {(templateMap[style.template] || renderModern)()}
+      </div>
+      {/* CTA + Banner appended below the signature */}
+      {(style.showCta && data.ctaUrl) && (
+        <table cellPadding={0} cellSpacing={0} style={{ borderCollapse: 'collapse', marginTop: '8px', fontFamily: font }} width="100%">
+          {renderCta()}
+        </table>
+      )}
+      {(style.showBanner && data.bannerImage) && (
+        <table cellPadding={0} cellSpacing={0} style={{ borderCollapse: 'collapse', marginTop: '4px', fontFamily: font }} width="100%">
+          {renderBanner()}
+        </table>
+      )}
+      {socials.length > 0 && (
+        <table cellPadding={0} cellSpacing={0} style={{ borderCollapse: 'collapse', fontFamily: font }}>
+          {renderSocialIcons()}
+        </table>
+      )}
     </div>
   );
 }
