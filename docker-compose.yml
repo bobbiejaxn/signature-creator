@@ -1,0 +1,17 @@
+services:
+  signature-creator:
+    build: .
+    container_name: signature-creator
+    restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.signature-creator.entryPoints=websecure
+      - traefik.http.routers.signature-creator.rule=Host(`signature-creator.debored.ai`)
+      - traefik.http.routers.signature-creator.tls.certresolver=letsencrypt
+      - traefik.http.services.signature-creator.loadbalancer.server.port=8080
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
