@@ -7,12 +7,14 @@ Autonomous agent orchestration layer for any software project. Drop it into your
 - **CEO agent** — autonomous PLAN→DELEGATE→REVIEW→VERIFY loop for high-level goals
 - **Dynamic CEO** — strategic layer that audits assets, sets OKRs, manages crons, routes tasks
 - **Board deliberation** — 8 advisors with competing biases debate before committing
-- **54 specialist agents** — architects, implementers, reviewers, researchers, verifiers, team leads
+- **60 specialist agents** — architects, implementers, reviewers, researchers, verifiers, team leads
 - **28 slash commands** — `/ship`, `/ceo`, `/deliberate`, `/verify-loop`, `/generate`, etc.
-- **17 TypeScript extensions** — runtime enforcement, model routing, trace recording, domain locking, session intelligence
-- **186 skills** — composable behaviors from code quality to Google Workspace to ad management
+- **20 TypeScript extensions** — runtime enforcement, model routing, trace recording, domain locking, session intelligence, post-edit lint, damage control, VPS tools, HTTP tools
+- **189 skills** — composable behaviors from code quality to Google Workspace to ad management
 - **6 hard-enforcement gates** — deterministic checks no agent can bypass
 - **Zero-trust review** — cross-model review, completion auditor, adversarial testing
+- **Tool allowlist enforcement** — agents with `tools:` frontmatter are structurally restricted to declared tools only
+- **Domain enforcement** — agents with `domain:` frontmatter get path-level read/write/delete restrictions (11 agents configured)
 - **Pi-to-Pi network** — agents communicate across Mac ↔ Hostinger ↔ NetCup
 - **Self-healing** — heartbeat + Telegram alerts + safe-update with auto-rollback
 - **Self-optimizing harness** — traces every call, diagnoses failures, proposes improvements
@@ -38,8 +40,8 @@ See [Quick Start Guide](docs/QUICKSTART.md) for the walkthrough.
 .pi/
 ├── agents/          60 agents (52 core + 8 board)
 ├── prompts/         28 slash commands
-├── extensions/      17 TypeScript extensions (subagent, CEO, model-router, session-intel, etc.)
-├── skills/          186 composable behaviors
+├── extensions/      20 TypeScript extensions (subagent, CEO, model-router, session-intel, post-edit-lint, damage-control, vps-tools, http-tools, etc.)
+├── skills/          189 composable behaviors
 ├── config.sh        Project settings (single source of truth)
 ├── expertise/       Per-agent mental models (compound over time)
 ├── learnings/       Self-learning loop (patterns auto-promote at 3+ recurrences)
@@ -85,7 +87,7 @@ scripts/             43 enforcement and automation scripts
 
 ## Extensions
 
-17 runtime extensions that enforce rules, capture traces, and continuously improve the harness.
+20 runtime extensions that enforce rules, capture traces, manage VPS, and continuously improve the harness.
 
 | Extension | What it does |
 |-----------|-------------|
@@ -112,13 +114,13 @@ scripts/             43 enforcement and automation scripts
 | Doc | Contents |
 |-----|----------|
 | [Agents](docs/agents.md) | Full roster — 60 agents, models, roles, tools |
-| [Extensions](docs/extensions.md) | 17 runtime extensions — what they intercept and enforce |
+| [Extensions](docs/extensions.md) | 20 runtime extensions — what they intercept and enforce |
 | [CEO & Board](docs/ceo-and-board.md) | CEO loop, dynamic CEO, board deliberation |
 | [Ship Pipeline](docs/ship-pipeline.md) | /ship phases, code quality enforcement, verifiers |
 | [Harness & Learning](docs/harness-and-learning.md) | Self-optimizing harness, mental models, learning loop |
 | [Cron Automation](docs/cron-automation.md) | Overnight shipping, dynamic cron management |
 | [Model Routing](docs/model-routing.md) | Multi-provider routing, frontier sweep |
-| [Skills Catalog](docs/skills-catalog.md) | 186 skills by category |
+| [Skills Catalog](docs/skills-catalog.md) | 189 skills by category |
 | [Setup Reference](docs/setup-reference.md) | Setup, update, config reference, supported stacks |
 
 ## Setup & Update
