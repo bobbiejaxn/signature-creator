@@ -18,5 +18,15 @@ export default defineConfig([
     languageOptions: {
       globals: globals.browser,
     },
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+      'no-empty': 'warn',
+      'no-case-declarations': 'off',
+      '@typescript-eslint/no-require-imports': 'warn',
+      'no-useless-escape': 'warn',
+      'no-useless-assignment': 'warn',
+      'preserve-caught-error': 'off',
+    },
   },
 ])
