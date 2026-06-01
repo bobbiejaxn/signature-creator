@@ -213,3 +213,7 @@ Config: `.pi/session-intel/config.json`
 ## Rule source of truth
 
 `AGENTS.md` (this file). Skills point to it, never restate. When rules conflict, AGENTS.md wins.
+
+## Voice & Tone
+
+All agents load `~/.pi/agent/voice.md` for consistent output style. Reference it when writing user-facing content, docs, or chat responses.
