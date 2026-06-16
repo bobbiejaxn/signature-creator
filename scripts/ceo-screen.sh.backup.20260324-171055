@@ -1,0 +1,181 @@
+#!/bin/bash
+# CEO wrapper using screen for interactive pi session
+# Handles 429 errors with automatic fallback
+# Usage: ./ceo-screen.sh "<goal>" <project-name> <project-dir>
+
+set -euo pipefail
+
+GOAL="$1"
+PROJECT_NAME="$2"
+PROJECT_DIR="${3:-$(pwd)}"
+SESSION_NAME="ceo-${PROJECT_NAME}"
+LOG_FILE="/tmp/ceo-${PROJECT_NAME}.log"
+PID_FILE="/tmp/ceo-${PROJECT_NAME}.pid"
+
+# Load API keys from Hermes env
+while IFS= read -r line; do
+  [[ -z "$line" || "$line" =~ ^# ]] && continue
+  export "$line"
+done < /root/.hermes/.env
+export ZAI_API_KEY="${ZAI_API_KEY:-${GLM_API_KEY:-}}"
+
+# Fallback chain
+MODELS=(
+  "zai/glm-5"
+  "minimax/minimax-m2.7"
+  "straico/anthropic/claude-sonnet-4.5"
+)
+
+# --- Process cleanup ---
+
+kill_project_processes() {
+  # Kill any pi processes for this project (orphans from prior runs)
+  local pids
+  pids=$(pgrep -f "pi.*--model.*${PROJECT_DIR}" 2>/dev/null || true)
+  if [[ -n "$pids" ]]; then
+    echo "🧹 Killing orphaned pi processes for $PROJECT_NAME: $pids"
+    echo "$pids" | xargs kill -9 2>/dev/null || true
+  fi
+  # Also kill timeout wrappers referencing this project
+  pids=$(pgrep -f "timeout.*pi.*${PROJECT_DIR}" 2>/dev/null || true)
+  if [[ -n "$pids" ]]; then
+    echo "$pids" | xargs kill -9 2>/dev/null || true
+  fi
+}
+
+kill_session() {
+  # Kill screen session and ALL child processes
+  local screen_pid
+  screen_pid=$(screen -ls 2>/dev/null | grep "$SESSION_NAME" | awk '{print $1}' | cut -d. -f1)
+  if [[ -n "$screen_pid" ]]; then
+    # Get all descendants of the screen process and kill them
+    local children
+    children=$(pstree -p "$screen_pid" 2>/dev/null | grep -oP '\(\K[0-9]+' || true)
+    if [[ -n "$children" ]]; then
+      echo "$children" | xargs kill -9 2>/dev/null || true
+    fi
+  fi
+  screen -S "$SESSION_NAME" -X quit 2>/dev/null || true
+  sleep 1
+}
+
+cleanup() {
+  echo "🛑 Cleaning up session $SESSION_NAME..."
+  kill_session
+  rm -f "$PID_FILE"
+}
+
+trap cleanup EXIT INT TERM
+
+# --- Preflight ---
+
+echo "🚀 CEO Session: $PROJECT_NAME"
+echo "📁 Project: $PROJECT_DIR"
+echo "🎯 Goal: ${GOAL:0:80}..."
+echo ""
+
+# Kill any existing session and orphans for this project
+kill_session
+kill_project_processes
+rm -f "$LOG_FILE" "$PID_FILE"
+
+check_key() {
+  local model="$1"
+  if [[ "$model" == zai/* ]] && [[ -z "${ZAI_API_KEY:-}" ]]; then
+    return 1
+  fi
+  if [[ "$model" == *"minimax"* ]] && [[ -z "${MINIMAX_API_KEY:-}" ]]; then
+    return 1
+  fi
+  if [[ "$model" == *"straico"* ]] && [[ -z "${STRAICO_API_KEY:-}" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# --- Main loop ---
+
+for model in "${MODELS[@]}"; do
+  if ! check_key "$model"; then
+    echo "⚠️ Skipping $model (no API key)"
+    continue
+  fi
+
+  echo "🔄 Starting with model: $model"
+
+  # Clear log for this model attempt (prevents stale rate-limit matches)
+  : > "$LOG_FILE"
+
+  # Start pi in screen with logging
+  screen -dmS "$SESSION_NAME" -L -Logfile "$LOG_FILE" \
+    bash -c "cd '$PROJECT_DIR' && pi --model '$model'"
+
+  # Wait for pi to be ready (look for the status bar)
+  for i in {1..15}; do
+    if grep -q "│\|──" "$LOG_FILE" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+
+  # Record the screen PID for cleanup
+  screen_pid=$(screen -ls 2>/dev/null | grep "$SESSION_NAME" | awk '{print $1}' | cut -d. -f1)
+  echo "$screen_pid" > "$PID_FILE"
+
+  # Send /ceo command
+  screen -S "$SESSION_NAME" -X stuff "/ceo ${GOAL}"$'\n'
+
+  echo "📊 CEO started in screen session: $SESSION_NAME"
+  echo "   Logs: $LOG_FILE"
+  echo "   Attach: screen -r $SESSION_NAME"
+  echo ""
+
+  # Monitor for rate limit, completion, or death
+  MONITOR_COUNT=0
+  while true; do
+    sleep 10
+    MONITOR_COUNT=$((MONITOR_COUNT + 1))
+
+    # Check if screen is still running
+    if ! screen -list 2>/dev/null | grep -q "$SESSION_NAME"; then
+      echo "⚠️ Session ended unexpectedly"
+      # Clean up any lingering child processes
+      kill_project_processes
+      break
+    fi
+
+    # Check for rate limit (429) — only in last 50 lines to avoid stale matches
+    if tail -50 "$LOG_FILE" 2>/dev/null | grep -qE "429|rate.?limit|1302|速率限制"; then
+      echo "❌ Rate limited on $model"
+      echo "$(date) - Rate limit on $model for $PROJECT_NAME" >> /tmp/ceo-rate-limits.log
+      kill_session
+      sleep 2
+      break
+    fi
+
+    # Check for completion
+    if grep -qE "COMPLETE|Goal achieved|All tasks complete|PR created|MISSION COMPLETE" "$LOG_FILE" 2>/dev/null; then
+      echo "✅ CEO completed on $model"
+      kill_session
+      exit 0
+    fi
+
+    # Check for escalation
+    if grep -qE "ESCALATE|Stuck|Needs human" "$LOG_FILE" 2>/dev/null; then
+      echo "⚠️ CEO escalated - needs human"
+      echo "   Attach: screen -r $SESSION_NAME"
+      # Don't kill session — leave it for human to inspect
+      trap - EXIT
+      exit 0
+    fi
+
+    # Progress ping every 60 seconds
+    if (( MONITOR_COUNT % 6 == 0 )); then
+      echo "   Running... (check $MONITOR_COUNT)"
+    fi
+  done
+done
+
+echo "❌ All models exhausted"
+echo "📋 Logs: $LOG_FILE, /tmp/ceo-rate-limits.log"
+exit 1

@@ -1,0 +1,121 @@
+#!/bin/bash
+# CEO wrapper using screen for interactive pi session
+# Handles 429 errors with automatic fallback
+# Usage: ./ceo-screen.sh "<goal>" <project-name> <project-dir>
+
+GOAL="$1"
+PROJECT_NAME="$2"
+PROJECT_DIR="${3:-$(pwd)}"
+SESSION_NAME="ceo-${PROJECT_NAME}"
+LOG_FILE="/tmp/ceo-${PROJECT_NAME}.log"
+PID_FILE="/tmp/ceo-${PROJECT_NAME}.pid"
+while IFS= read -r line; do
+  [[ -z "$line" || "$line" =~ ^# ]] && continue
+  export "$line"
+done < /root/.hermes/.env
+export ZAI_API_KEY="${ZAI_API_KEY:-$GLM_API_KEY}"
+
+# Fallback chain: Z.ai first, then MiniMax, then Claude via Straico
+MODELS=(
+  "zai/glm-5"
+  "minimax/minimax-m2.7"
+  "straico/anthropic/claude-sonnet-4.5"
+)
+
+echo "🚀 CEO Session: $PROJECT_NAME"
+echo "📁 Project: $PROJECT_DIR"
+echo "🎯 Goal: ${GOAL:0:50}..."
+echo ""
+
+# Clean up existing session
+screen -S "$SESSION_NAME" -X quit 2>/dev/null
+rm -f "$LOG_FILE" "$PID_FILE"
+
+check_key() {
+  local model="$1"
+  if [[ "$model" == *"minimax"* ]] && [[ -z "$MINIMAX_API_KEY" ]]; then
+    return 1
+  fi
+  if [[ "$model" == *"claude"* ]] && [[ -z "$ANTHROPIC_API_KEY" ]] && [[ -z "$STRAICO_API_KEY" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+for model in "${MODELS[@]}"; do
+  if ! check_key "$model"; then
+    echo "⚠️ Skipping $model (no API key)"
+    continue
+  fi
+  
+  echo "🔄 Starting with model: $model"
+  
+  # Start pi in screen with logging
+  screen -dmS "$SESSION_NAME" -L -Logfile "$LOG_FILE" \
+    bash -c "cd '$PROJECT_DIR' && pi --model '$model'"
+  
+  echo $! > "$PID_FILE"
+  sleep 5
+  
+  # Send the /ceo command to pi (not bash)
+  # Need to wait for pi to be ready
+  for i in {1..10}; do
+    if grep -q "│" "$LOG_FILE" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  
+  # Send /ceo command
+  screen -S "$SESSION_NAME" -X stuff "/ceo ${GOAL}"$'\n'
+  
+  echo "📊 CEO started in screen session: $SESSION_NAME"
+  echo "   Logs: $LOG_FILE"
+  echo "   Attach: screen -r $SESSION_NAME"
+  echo "   Monitor: tail -f $LOG_FILE"
+  echo ""
+  
+  # Monitor for rate limit or completion
+  MONITOR_COUNT=0
+  while true; do
+    sleep 10
+    MONITOR_COUNT=$((MONITOR_COUNT + 1))
+    
+    # Check if screen is still running
+    if ! screen -list | grep -q "$SESSION_NAME"; then
+      echo "⚠️ Session ended unexpectedly"
+      break
+    fi
+    
+    # Check for rate limit (429)
+    if grep -qE "429|rate.?limit|1302|速率限制" "$LOG_FILE" 2>/dev/null; then
+      echo "❌ Rate limited on $model"
+      echo "$(date) - Rate limit on $model for $PROJECT_NAME" >> /tmp/ceo-rate-limits.log
+      screen -S "$SESSION_NAME" -X quit
+      sleep 2
+      break
+    fi
+    
+    # Check for completion
+    if grep -qE "COMPLETE|Goal achieved|All tasks complete|PR created" "$LOG_FILE" 2>/dev/null; then
+      echo "✅ CEO completed on $model"
+      exit 0
+    fi
+    
+    # Check for escalation
+    if grep -qE "ESCALATE|Stuck|Needs human" "$LOG_FILE" 2>/dev/null; then
+      echo "⚠️ CEO escalated - needs human"
+      echo "   Attach: screen -r $SESSION_NAME"
+      exit 0
+    fi
+    
+    # Progress ping every 60 seconds
+    if (( MONITOR_COUNT % 6 == 0 )); then
+      echo "   Running... (check $MONITOR_COUNT)"
+    fi
+  done
+done
+
+echo "❌ All models exhausted"
+echo "📋 Logs: $LOG_FILE, /tmp/ceo-rate-limits.log"
+exit 1

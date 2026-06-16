@@ -1,0 +1,141 @@
+#!/bin/bash
+# CEO with automatic model fallback on rate limits
+# Runs CEO agent directly via pi in non-interactive mode
+# Usage: ./ceo-with-fallback.sh "<goal>" [project-dir]
+
+set -e
+
+GOAL="$1"
+PROJECT_DIR="${2:-$(pwd)}"
+MAX_RETRIES=3
+
+# Fallback chain: primary → minimax → straico
+MODELS=(
+  "anthropic/claude-opus-4-6"
+  "minimax/abab6.5s-chat"
+  "straico/anthropic/claude-sonnet-4.5"
+)
+
+# Check for required API keys
+check_api_keys() {
+  local model="$1"
+  
+  if [[ "$model" == *"minimax"* ]] && [[ -z "$MINIMAX_API_KEY" ]]; then
+    echo "⚠️ MINIMAX_API_KEY not set, skipping minimax fallback" >> /tmp/ceo-fallback.log
+    return 1
+  fi
+  
+  if [[ "$model" == *"straico"* ]] && [[ -z "$STRAICO_API_KEY" ]]; then
+    echo "⚠️ STRAICO_API_KEY not set, skipping straico fallback" >> /tmp/ceo-fallback.log
+    return 1
+  fi
+  
+  return 0
+}
+
+# Run CEO agent directly with pi
+run_ceo_with_model() {
+  local model="$1"
+  local attempt="$2"
+  
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - Attempt $attempt with model: $model" >> /tmp/ceo-fallback.log
+  
+  cd "$PROJECT_DIR"
+  
+  # Run pi in non-interactive mode with CEO agent prompt
+  # The CEO extension registers a "ceo" tool, but in -p mode we need to invoke the agent directly
+  # Use the CEO agent definition as system prompt
+  local ceo_agent=".pi/agents/ceo.md"
+  local ceo_prompt="You are the CEO. Goal: $GOAL
+  
+Start by planning, then delegate tasks to workers, review their output, and iterate until the goal is achieved.
+Use the available workers: architect, implementer, reviewer, security-reviewer, test-writer, fixer, debug-agent.
+Report progress and create a PR when complete."
+  
+  # Run with timeout and capture output
+  local output
+  local exit_code
+  
+  output=$(timeout 3600 pi -p --no-session --model "$model" --append-system-prompt "$ceo_agent" "$ceo_prompt" 2>&1) && exit_code=$? || exit_code=$?
+  
+  # Log output for debugging
+  echo "$output" >> /tmp/ceo-output-${model//\//-}.log
+  
+  # Check for timeout
+  if [[ $exit_code -eq 124 ]]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Timeout on $model" >> /tmp/ceo-fallback.log
+    return 1
+  fi
+  
+  # Check for rate limit errors
+  if echo "$output" | grep -qE "429|rate.?limit|1302|速率限制"; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Rate limited on $model" >> /tmp/ceo-fallback.log
+    echo "$output" >> /tmp/ceo-rate-limits.log
+    return 1
+  fi
+  
+  # Check for other errors
+  if [[ $exit_code -ne 0 ]]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Error (exit $exit_code) on $model" >> /tmp/ceo-fallback.log
+    return 1
+  fi
+  
+  # Success - check for actual completion indicators
+  if echo "$output" | grep -qE "COMPLETE|complete|done|finished|PR created"; then
+    echo "$output"
+    return 0
+  fi
+  
+  # If output is substantial, assume progress
+  if [[ ${#output} -gt 1000 ]]; then
+    echo "$output"
+    return 0
+  fi
+  
+  return 1
+}
+
+# Main loop with fallback
+echo "🚀 Starting CEO session: $GOAL"
+echo "📁 Project: $PROJECT_DIR"
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting CEO: $GOAL" >> /tmp/ceo-fallback.log
+
+for model in "${MODELS[@]}"; do
+  if ! check_api_keys "$model"; then
+    continue
+  fi
+  
+  for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
+    if run_ceo_with_model "$model" "$attempt"; then
+      echo ""
+      echo "✅ CEO completed successfully with $model"
+      echo "$(date '+%Y-%m-%d %H:%M:%S') - Success with $model" >> /tmp/ceo-fallback.log
+      exit 0
+    fi
+    
+    # If rate limited, wait and try next model
+    if [[ $attempt -eq $MAX_RETRIES ]]; then
+      echo "⏭️ Max retries reached for $model, trying next fallback..."
+      break
+    fi
+    
+    # Exponential backoff
+    sleep $((2 ** attempt))
+  done
+done
+
+echo ""
+echo "❌ All models exhausted. CEO session failed."
+echo "$(date '+%Y-%m-%d %H:%M:%S') - All models exhausted" >> /tmp/ceo-fallback.log
+echo "📋 Check logs: /tmp/ceo-fallback.log, /tmp/ceo-rate-limits.log"
+
+# Create GitHub issue for escalation
+if command -v gh &> /dev/null; then
+  cd "$PROJECT_DIR"
+  gh issue create \
+    --title "CEO Session Failed: Rate Limit Exhaustion" \
+    --body "Goal: $GOAL\n\nAll fallback models hit rate limits:\n${MODELS[*]}\n\nCheck /tmp/ceo-rate-limits.log for details." \
+    --label "ceo-escalation,blocked" 2>/dev/null || true
+fi
+
+exit 1

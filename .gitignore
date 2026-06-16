@@ -15,7 +15,6 @@ dist-ssr
 # Pi harness
 .pi/
 .learnings/
-scripts/
 
 # Docker
 *.env
