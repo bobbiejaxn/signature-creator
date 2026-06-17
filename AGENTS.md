@@ -1,3 +1,10 @@
+> **AI Agent Manifesto — Global Inheritance** *(fleet sweep 2026-06-11)*.
+> This project inherits its operating principles from the global compact at `~/.pi/agent/AGENTS.md` (manifesto + system-design + crystallization + 1-3-1 + Definition of Done).
+> Per Manifesto VII.26, this file holds only project-specific specialization. Per VII.27, an undeclared contradiction is a conflict — escalate via 1-3-1 (Manifesto II.6).
+> Read in order: `~/.pi/agent/AGENTS.md` → `AGENT_MANIFESTO.md` → `system-design.md` → `crystallization.md`.
+> Canonical source: github.com/bobbiejaxn/ai-agent-manifesto (commit pinned via ~/.pi/agent/.last-synced-sha).
+
+---
 # Agentic Launchpad
 
 ## Setup Check
