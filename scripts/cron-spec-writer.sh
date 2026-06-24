@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cron-spec-writer.sh — v3 pattern
+# cron-spec-writer.sh — v3 pattern + meta-action gate (#254)
 # Fetches issues labeled 'backlog' OR 'spec-hold', runs pi to produce a USVA
 # spec for each, posts the spec as a GitHub comment, and labels the issue
 # 'spec-ready'.
@@ -8,6 +8,24 @@
 #   Layer 1 — Prompt instructs agent to use `write` tool (not bash) and NOT commit
 #   Layer 2 — Pre-commit guard verifies spec file exists before committing
 #   Layer 3 — Post-run audit summarizes successes and failures
+#
+# ── Meta-action gate (#254, supplements #247) ─────────────────────────────────
+# Issues that are *about* the agent, its policy, or its infrastructure and
+# explicitly delegate authority to a human (MG) MUST NOT be auto-approved.
+# Three signal classes, checked at the top of the per-issue loop (before the
+# spec is written, before spec-ready/spec-approved are added):
+#   1. Title matches /^MG ACTION:/i.
+#   2. Body matches (case-insensitive) "CEO cannot do this",
+#      "requires MG decision", or "DATA PROTECTION RULE".
+#   3. Issue carries any of {out-of-scope, blocker, human-review}.
+# If any signal matches: post a comment, route the issue to the `human-review`
+# label (NOT `blocker` — that label keeps its single meaning of "hard-stop
+# on the pipeline"; `human-review` is the dedicated queue for MG triage),
+# remove `spec-approved` if present, and continue to the next issue. See
+# #254 (this issue), #247 (parent meta-action-gate spec), #243 (the
+# 2026-06-23 incident that motivated the gate).
+# The cron-auto-ship.sh cron has a mirrored defense-in-depth pre-flight that
+# runs immediately before the pi orchestrator is invoked.
 
 set -euo pipefail
 export BASH_WHITELIST_MODE="log"
@@ -75,13 +93,17 @@ log "Fetching issues labeled 'backlog' or 'spec-hold'..."
 ISSUES=$("$GH_BIN" issue list \
   --repo "$REPO" \
   --state open \
-  --search 'label:backlog,spec-hold -label:spec-ready -label:spec-approved -label:in-progress' \
+  --search 'label:backlog,spec-hold -label:spec-ready -label:spec-approved -label:in-progress -label:blocker -label:human-review' \
   --json number,title,labels \
   --limit 50 \
   --jq '[.[] | select(
     (.labels | map(.name) | contains(["spec-ready"]) | not) and
     (.labels | map(.name) | contains(["spec-approved"]) | not) and
-    (.labels | map(.name) | contains(["in-progress"]) | not)
+    (.labels | map(.name) | contains(["in-progress"]) | not) and
+    (.labels | map(.name) | contains(["out-of-scope"]) | not) and
+    (.labels | map(.name) | contains(["shipped"]) | not) and
+    (.labels | map(.name) | contains(["blocker"]) | not) and
+    (.labels | map(.name) | contains(["human-review"]) | not)
   ) | .number] | .[]' 2>/dev/null)
 
 if [ -z "$ISSUES" ]; then
@@ -92,11 +114,18 @@ fi
 ISSUE_COUNT=$(echo "$ISSUES" | wc -l | tr -d ' ')
 log "Found $ISSUE_COUNT issue(s) to process: $(echo "$ISSUES" | tr '\n' ' ')"
 
-# Pre-flight: kill orphan pi processes from previous runs
-ORPHANS=$(pgrep -f "pi.*--no-session" 2>/dev/null || true)
-if [ -n "$ORPHANS" ]; then
-  log "[CLEANUP] Killing orphan pi processes: $ORPHANS"
-  echo "$ORPHANS" | xargs kill 2>/dev/null || true
+# Pre-flight: kill orphan pi processes from previous runs (THIS PROJECT ONLY)
+PROJECT_DIR="$(pwd)"
+ORPHAN_PIDS=""
+for PID in $(pgrep -f "pi.*--no-session" 2>/dev/null || true); do
+  PID_CWD=$(readlink -f /proc/$PID/cwd 2>/dev/null || echo "")
+  if [ "$PID_CWD" = "$PROJECT_DIR" ]; then
+    ORPHAN_PIDS="$ORPHAN_PIDS $PID"
+  fi
+done
+if [ -n "$ORPHAN_PIDS" ]; then
+  log "[CLEANUP] Killing orphan pi processes (this project only): $ORPHAN_PIDS"
+  echo "$ORPHAN_PIDS" | xargs kill 2>/dev/null || true
   sleep 2
 fi
 
@@ -143,6 +172,45 @@ for ISSUE_NUMBER in $ISSUES; do
     FAIL_COUNT=$((FAIL_COUNT + 1))
     continue
   }
+
+  # -- Meta-action gate (#254) -------------------------------------------------
+  # Detect issues that the agent must NOT auto-approve: MG ACTION: titles,
+  # bodies that explicitly delegate to MG, or issues already labelled as
+  # meta-action. Routes matches to `human-review` (not `blocker`).
+  ISSUE_TITLE=$(echo "$ISSUE_CONTENT" | sed -n '1{s/^#\([0-9]\+\) //p;q}')
+  ISSUE_BODY=$(echo "$ISSUE_CONTENT" | sed '1,/^$/d')
+  ISSUE_LABELS_JSON=$("$GH_BIN" issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null | tr '\n' ' ' || echo "")
+  META_ACTION_REASON=""
+
+  # Signal 1: title matches /^MG ACTION:/i
+  if echo "$ISSUE_TITLE" | grep -qiE '^MG ACTION:'; then
+    META_ACTION_REASON="title matches /MG ACTION:/i"
+  fi
+
+  # Signal 2: body matches a meta-action phrase (case-insensitive)
+  if [ -z "$META_ACTION_REASON" ] && \
+     echo "$ISSUE_BODY" | grep -qiE 'CEO cannot do this|requires MG decision|DATA PROTECTION RULE'; then
+    META_ACTION_REASON="body matches meta-action phrase (CEO cannot do this / requires MG decision / DATA PROTECTION RULE)"
+  fi
+
+  # Signal 3: issue carries an explicit meta-action label
+  if [ -z "$META_ACTION_REASON" ] && \
+     echo "$ISSUE_LABELS_JSON" | grep -qwE 'out-of-scope|blocker|human-review'; then
+    META_ACTION_REASON="issue labelled out-of-scope|blocker|human-review"
+  fi
+
+  if [ -n "$META_ACTION_REASON" ]; then
+    log "[SKIP-META] issue #$ISSUE_NUMBER: $META_ACTION_REASON — routing to human-review"
+    "$GH_BIN" issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+      --body "🛑 Detected as a meta-action issue ($META_ACTION_REASON). Auto-approval skipped. Issue is routed to \`human-review\` for MG triage. See #254." 2>/dev/null || true
+    "$GH_BIN" issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+      --add-label "human-review" \
+      --remove-label "spec-approved" \
+      --remove-label "spec-ready" 2>/dev/null || true
+    rm -f "$PRE_RUN_MARKER"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    continue
+  fi
 
   log "Running pi spec writer on issue #$ISSUE_NUMBER..."
 
@@ -205,8 +273,8 @@ Important: run autonomously to completion, do not ask for confirmation." 2>&1 &
   PI_PID=$!
   start_heartbeat $PI_PID &
   HEARTBEAT_PID=$!
-  wait $PI_PID 2>/dev/null
-  EXIT_CODE=$?
+  EXIT_CODE=0
+  wait $PI_PID 2>/dev/null || EXIT_CODE=$?
   if [ -n "$HEARTBEAT_PID" ]; then
     kill "$HEARTBEAT_PID" 2>/dev/null || true
   fi
