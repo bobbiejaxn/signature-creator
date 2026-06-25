@@ -34,6 +34,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Auto-detect project root (works from any nesting level)
 PROJECT_DIR="$(cd "$SCRIPT_DIR" && while [ "$(pwd)" != "/" ]; do [ -f ".pi/config.sh" ] && pwd && break; cd ..; done)"
 
+# -- Unmerged-files pre-flight guard (issue #139, restored via #268) ───────────
+# Source the shared library if present; other fleet repos that don't ship the
+# library parse this canonical cleanly because the source is guarded. When the
+# lib is present (e.g. ai-trader post-#268), the STARTUP + per-issue gates fire
+# before any spec is written, preventing the "empty commit / half-merged spec"
+# failure mode that motivated #139.
+if [ -f "$SCRIPT_DIR/lib/unmerged-files-guard.sh" ]; then
+  source "$SCRIPT_DIR/lib/unmerged-files-guard.sh"
+fi
+
 CONFIG_FILE="$PROJECT_DIR/.pi/config.sh"
 if [ -f "$CONFIG_FILE" ]; then
   source "$CONFIG_FILE"
@@ -153,10 +163,31 @@ NEW_COUNT=0
 VERIFIED_COUNT=0
 FAIL_COUNT=0
 
+# -- STARTUP unmerged-files pre-flight (issue #139, restored via #268) ─────────
+# Runs once before the issue loop. Aborts the whole cron on bad state. No-op
+# on repos that don't source the unmerged-files-guard.sh library (the function
+# is undefined and the if-check below just falls through).
+if declare -f unmerged_files_preflight_startup >/dev/null 2>&1; then
+  if ! unmerged_files_preflight_startup "$PROJECT_DIR"; then
+    log "[STARTUP] Unmerged-files pre-flight failed — aborting cron run before any spec is written"
+    exit 1
+  fi
+fi
+
 # -- Process each issue ────────────────────────────────────────────────────────
 for ISSUE_NUMBER in $ISSUES; do
   log "----------------------------------------"
   log "Processing issue #$ISSUE_NUMBER..."
+
+  # -- Per-issue unmerged-files pre-flight (issue #139, restored via #268) ─────
+  # Skips this issue if repo state became uncommittable since startup. No-op
+  # on repos that don't source the unmerged-files-guard.sh library.
+  if declare -f unmerged_files_preflight_per_issue >/dev/null 2>&1; then
+    if ! unmerged_files_preflight_per_issue "$PROJECT_DIR"; then
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      continue
+    fi
+  fi
 
   # Ensure specs directory exists (defensive)
   mkdir -p "$PROJECT_DIR/specs/usva"

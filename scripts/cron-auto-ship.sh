@@ -670,7 +670,7 @@ else:
   timeout --kill-after=5 "$PI_TIMEOUT" "$PI_BIN" --no-extensions -e .pi/extensions/subagent/index.ts -e .pi/extensions/model-router/index.ts -e .pi/extensions/github-tools/index.ts --mode json --no-session \
     --provider "$SHIP_PROVIDER" \
     --model "$SHIP_MODEL" \
-    "$(cat <<PI_PROMPT
+    "$(cat <<'PI_PROMPT'
 You are the ship orchestrator for the ${PROJECT_NAME} codebase at $PROJECT_DIR.
 
 Your job: execute the full ship workflow for GitHub issue #$ISSUE_NUMBER end-to-end.
@@ -823,7 +823,7 @@ PI_PROMPT
         --mode json --no-session \
         --provider "$SHIP_PROVIDER" \
         --model "$SHIP_MODEL" \
-        "$(cat <<PI_PROMPT_RETRY
+        "$(cat <<'PI_PROMPT_RETRY'
 RETRY: The primary model timed out. This is a fallback attempt with model ${FALLBACK_MOD}.
 You are the ship orchestrator for the ${PROJECT_NAME} codebase at $PROJECT_DIR.
 Your job: execute the full ship workflow for GitHub issue #$ISSUE_NUMBER end-to-end.
