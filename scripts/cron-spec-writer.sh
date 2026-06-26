@@ -100,21 +100,46 @@ trap 'rm -f "$LOCKFILE"' EXIT
 # check against any issue that slips through.
 log "Fetching issues labeled 'backlog' or 'spec-hold'..."
 
-ISSUES=$("$GH_BIN" issue list \
-  --repo "$REPO" \
-  --state open \
-  --search 'label:backlog,spec-hold -label:spec-ready -label:spec-approved -label:in-progress -label:blocker -label:human-review' \
-  --json number,title,labels \
-  --limit 50 \
-  --jq '[.[] | select(
-    (.labels | map(.name) | contains(["spec-ready"]) | not) and
-    (.labels | map(.name) | contains(["spec-approved"]) | not) and
-    (.labels | map(.name) | contains(["in-progress"]) | not) and
-    (.labels | map(.name) | contains(["out-of-scope"]) | not) and
-    (.labels | map(.name) | contains(["shipped"]) | not) and
-    (.labels | map(.name) | contains(["blocker"]) | not) and
-    (.labels | map(.name) | contains(["human-review"]) | not)
-  ) | .number] | .[]' 2>/dev/null)
+# Source the centralized discovery library (single source of truth per
+# USVA spec centralized-spec-writer-discovery-drift-prevention.usva.md,
+# issue #83). Replaces the broken --search 'label:backlog,spec-hold ...'
+# pattern that silently returns 0 issues (per issue #75 / #78).
+DISCOVERY_LIB="$PROJECT_DIR/lib/spec-writer-discovery.sh"
+if [ ! -f "$DISCOVERY_LIB" ]; then
+  log "ERROR: discovery lib not found at $DISCOVERY_LIB"
+  exit 1
+fi
+# shellcheck source=lib/spec-writer-discovery.sh
+source "$DISCOVERY_LIB"
+
+CANDIDATES_FILE="$(mktemp)"
+trap 'rm -f "$CANDIDATES_FILE"' EXIT
+
+ISSUE_STDERR_FILE="$(mktemp)"
+trap 'rm -f "$CANDIDATES_FILE" "$ISSUE_STDERR_FILE"' EXIT
+
+set +e
+ISSUES=$(spec_writer_discovery "$REPO" "$CANDIDATES_FILE" 2>"$ISSUE_STDERR_FILE")
+DISCOVERY_RC=$?
+set -e
+
+if [ -s "$ISSUE_STDERR_FILE" ]; then
+  while IFS= read -r line; do
+    log "$line"
+  done < "$ISSUE_STDERR_FILE"
+fi
+
+case "$DISCOVERY_RC" in
+  0) ;;
+  1)
+    log "No eligible backlog issues found. Exiting."
+    exit 0
+    ;;
+  *)
+    log "spec_writer_discovery exited $DISCOVERY_RC — aborting"
+    exit 1
+    ;;
+esac
 
 if [ -z "$ISSUES" ]; then
   log "No eligible backlog issues found. Exiting."
