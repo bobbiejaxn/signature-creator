@@ -950,7 +950,36 @@ if final_text:
   SHIP_VERIFIED=false
   if [ $EXIT_CODE -eq 0 ]; then
     # Check if pi created a PR referencing this issue
-    PR_CHECK=$("$GH_BIN" pr list --repo "$REPO" --state open --search "$ISSUE_NUMBER" --json number --jq ".[0].number" 2>/dev/null || echo "")
+  # ── Check 0: Orchestrator MR_URL marker (cross-repo ship signal) ────────
+  # When pi (or any orchestrator in Phase 8 / handoff) opens an MR on a
+  # remote other than $REPO (e.g. git.debored.ai for hermes-admin projects),
+  # it MUST leave a comment of the form:
+  #     MR_URL: https://<host>/<owner>/<repo>/pulls/<n>
+  # on its own line (no leading whitespace, case-sensitive). This check
+  # parses that marker and short-circuits the 4 in-repo fallback checks
+  # below. Do NOT remove this block — it's the only signal that survives a
+  # cross-repo ship (see issue #88).
+  if [ $EXIT_CODE -eq 0 ] && [ "$SHIP_VERIFIED" != true ]; then
+    MR_URL=""
+    MR_URL_COMMENT=$("$GH_BIN" issue view "$ISSUE_NUMBER" --repo "$REPO" \
+      --json comments --jq '.comments[].body' 2>/dev/null || echo "")
+    if [ -n "$MR_URL_COMMENT" ]; then
+      # Match a standalone "MR_URL: <url>" line. Anchored with grep -E to
+      # avoid mid-sentence false positives (e.g. "see MR_URL: foo" inside a
+      # sentence). Strip leading/trailing whitespace.
+      MR_URL=$(printf '%s\n' "$MR_URL_COMMENT" \
+        | grep -E '^MR_URL:[[:space:]]+https?://[^[:space:]]+$' \
+        | head -n 1 \
+        | sed -E 's/^MR_URL:[[:space:]]+//' \
+        || true)
+    fi
+    if [ -n "$MR_URL" ]; then
+      log "Issue #$ISSUE_NUMBER shipped successfully — MR_URL marker found: $MR_URL"
+      SHIP_VERIFIED=true
+    fi
+  fi
+
+  PR_CHECK=$("$GH_BIN" pr list --repo "$REPO" --state open --search "$ISSUE_NUMBER" --json number --jq ".[0].number" 2>/dev/null || echo "")
     if [ -n "$PR_CHECK" ]; then
       log "Issue #$ISSUE_NUMBER shipped successfully — PR #$PR_CHECK"
       SHIP_VERIFIED=true
