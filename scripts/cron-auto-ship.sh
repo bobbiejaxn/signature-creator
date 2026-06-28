@@ -23,17 +23,17 @@ set -euo pipefail
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Auto-detect project root (works from any nesting level)
-PROJECT_DIR="$(cd "$SCRIPT_DIR" && while [ "$(pwd)" != "/" ]; do [ -f ".pi/config.sh" ] && pwd && break; cd ..; done)"
+export PROJECT_DIR="$(cd "$SCRIPT_DIR" && while [ "$(pwd)" != "/" ]; do [ -f ".pi/config.sh" ] && pwd && break; cd ..; done)"
 
 # Load project config
 source "$PROJECT_DIR/.pi/config.sh"
 
 
 # Auto-detect default branch (works for both main and master repos)
-DEFAULT_BRANCH="$(cd "$PROJECT_DIR" && git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}' || echo main)"
+export DEFAULT_BRANCH="$(cd "$PROJECT_DIR" && git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}' || echo main)"
 
 # Derive REPO for gh CLI (owner/repo format)
-REPO="${REPO:-$(echo "$PROJECT_REPO" | sed "s|https://github.com/||" | sed "s|\.git$||")}"
+export REPO="${REPO:-$(echo "$PROJECT_REPO" | sed "s|https://github.com/||" | sed "s|\.git$||")}"
 export BASH_WHITELIST_MODE="log"
 
 LOG_DIR="$PROJECT_DIR/logs/cron"
@@ -106,7 +106,7 @@ PI_SUBAGENT_TIMEOUT_MS="${PI_SUBAGENT_TIMEOUT_MS:-600000}"  # 10 min per subagen
 PI_STEP_TIMEOUT="${PI_STEP_TIMEOUT:-300}"  # 5 min with no JSONL output → kill pi and report failure
 export PI_SUBAGENT_TIMEOUT_MS  # propagate to pi orchestrator so child processes get killed faster
 PI_BIN="${PI_BIN:-$(command -v pi)}"
-GH_BIN="${GH_BIN:-$(command -v gh)}"
+export GH_BIN="${GH_BIN:-$(command -v gh)}"
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 mkdir -p "$LOG_DIR"
@@ -252,7 +252,7 @@ EXIT_CODE=0  # initialise so cleanup trap never sees unbound variable
 while true; do
   log "Fetching next issue labeled spec-approved (auto-approved)..."
 
-  ISSUE_NUMBER=$("$GH_BIN" issue list \
+  export ISSUE_NUMBER=$("$GH_BIN" issue list \
     --repo "$REPO" \
     --label spec-approved \
     --state open \
@@ -315,20 +315,20 @@ while true; do
   # ── Load learnings context ──────────────────────────────────────────────────
   LEARNINGS_FILE="$PROJECT_DIR/.learnings/LEARNINGS.md"
   if [ -f "$LEARNINGS_FILE" ]; then
-    LEARNINGS_SNIPPET=$(tail -80 "$LEARNINGS_FILE")
+    export LEARNINGS_SNIPPET=$(tail -80 "$LEARNINGS_FILE")
   else
-    LEARNINGS_SNIPPET="No learnings file found."
+    export LEARNINGS_SNIPPET="No learnings file found."
   fi
 
   # ── Fetch issue + spec ──────────────────────────────────────────────────────
-  ISSUE_CONTENT=$("$GH_BIN" issue view "$ISSUE_NUMBER" --repo "$REPO" \
+  export ISSUE_CONTENT=$("$GH_BIN" issue view "$ISSUE_NUMBER" --repo "$REPO" \
     --json number,title,body --jq '"#\(.number) \(.title)\n\n\(.body)"' 2>&1)
 
-  ISSUE_TITLE=$("$GH_BIN" issue view "$ISSUE_NUMBER" --repo "$REPO" \
+  export ISSUE_TITLE=$("$GH_BIN" issue view "$ISSUE_NUMBER" --repo "$REPO" \
     --json title --jq '.title' 2>&1)
 
   # Derive slug from title (strip prefix, kebab-case)
-  FEATURE_SLUG=$(echo "$ISSUE_TITLE" \
+  export FEATURE_SLUG=$(echo "$ISSUE_TITLE" \
     | sed 's/^feat: //;s/^fix: //;s/^refactor: //;s/^chore: //' \
     | tr '[:upper:]' '[:lower:]' \
     | sed 's/[^a-z0-9]/-/g;s/--*/-/g;s/^-//;s/-$//' \
@@ -670,7 +670,8 @@ else:
   timeout --kill-after=5 "$PI_TIMEOUT" "$PI_BIN" --no-extensions -e .pi/extensions/subagent/index.ts -e .pi/extensions/model-router/index.ts -e .pi/extensions/github-tools/index.ts --mode json --no-session \
     --provider "$SHIP_PROVIDER" \
     --model "$SHIP_MODEL" \
-    "$(cat <<'PI_PROMPT'
+    "$(cat <<'PI_PROMPT' | envsubst \
+      '${PROJECT_NAME} ${PROJECT_DIR} ${ISSUE_NUMBER} ${ISSUE_TITLE} ${ISSUE_CONTENT} ${FEATURE_SLUG} ${LEARNINGS_SNIPPET} ${DEFAULT_BRANCH} ${REPO} ${GH_BIN}'
 You are the ship orchestrator for the ${PROJECT_NAME} codebase at $PROJECT_DIR.
 
 Your job: execute the full ship workflow for GitHub issue #$ISSUE_NUMBER end-to-end.
@@ -823,7 +824,8 @@ PI_PROMPT
         --mode json --no-session \
         --provider "$SHIP_PROVIDER" \
         --model "$SHIP_MODEL" \
-        "$(cat <<'PI_PROMPT_RETRY'
+        "$(cat <<'PI_PROMPT_RETRY' | envsubst \
+          '${PROJECT_NAME} ${PROJECT_DIR} ${ISSUE_NUMBER} ${ISSUE_TITLE} ${ISSUE_CONTENT} ${FEATURE_SLUG} ${LEARNINGS_SNIPPET} ${DEFAULT_BRANCH} ${REPO} ${GH_BIN} ${FALLBACK_MOD}'
 RETRY: The primary model timed out. This is a fallback attempt with model ${FALLBACK_MOD}.
 You are the ship orchestrator for the ${PROJECT_NAME} codebase at $PROJECT_DIR.
 Your job: execute the full ship workflow for GitHub issue #$ISSUE_NUMBER end-to-end.
