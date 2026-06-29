@@ -57,10 +57,9 @@ check_dlq_retry_limit() {
     # the query could match on, otherwise the issue re-enters the queue
     # under search eventual-consistency or future query-label migration (#215).
     # gh --remove-label is idempotent — safe on already-absent labels.
-    "$GH_BIN" issue edit "$issue_num" --repo "$REPO" \
-      --remove-label "spec-approved" \
-      --remove-label "spec-ready" \
-      --add-label "spec-hold" 2>/dev/null || true
+    # Refactored to shared helper in #265 — argv shape preserved byte-for-byte
+    # (VC-2 / VC-6 of extract-duplicate-dequeue-logic-label-helper.usva.md).
+    bash "$PROJECT_DIR/scripts/with-dequeue.sh" hold "$issue_num"
     "$GH_BIN" issue comment "$issue_num" --repo "$REPO" --body "⚠️ Auto-ship paused: $dlq_count consecutive failures. Moved to \`spec-hold\`. Needs human review before re-queueing. Last errors in DLQ." 2>/dev/null || true
     # Move DLQ entries to dead folder
     for f in "$DLQ_DIR"/*-${project_name}-${issue_num}*; do
@@ -136,11 +135,106 @@ if ! flock -n 201; then
 fi
 echo $$ > "$LOCKFILE"   # advisory diagnostic only; the lock is the kernel flock
 
+# ── Background-job shutdown helpers (#312) ────────────────────────────────────
+# Deterministic reap of every background child the script spawns so the
+# process-substitution `tee` pipe sees EOF and closes.
+#
+# Why process-tree kill, not just the subshell PID:
+#   The `tee` pipe stays open as long as *any* process holds the inherited
+#   write-end fd. The heartbeat subshell forks `sleep 60` (an external
+#   binary), which inherits that fd. Killing only the subshell orphans the
+#   `sleep`; the orphan keeps the pipe open. Killing the whole tree
+#   (subshell + its `sleep` child via `pgrep -P`) guarantees every writer
+#   is gone, so `tee` sees EOF and exits. This is the load-bearing mechanism.
+#
+# Why a bounded reap, not `wait`:
+#   `wait` is a bash builtin; `timeout 5 wait` cannot wrap it (`timeout`
+#   would exec a non-existent `wait` binary). The contract instead SIGTERMs
+#   the trees, then polls `kill -0` for a small fixed budget (≤5s) and
+#   SIGKILLs stragglers. The current children always honor SIGTERM
+#   (interruptible `sleep`), so this is defense-in-depth, but it makes
+#   the shutdown deterministic — the script provably cannot hang on a
+#   background child.
+#
+# Why both post-loop AND trap:
+#   Post-loop covers the observed happy-path hang. The EXIT trap covers
+#   every other exit (error, `set -e`, signal, timeout). They share one
+#   function so the contract is defined once. Both are idempotent (killing
+#   an already-dead PID is a no-op) so calling both on a normal exit is safe.
+
+# Maximum seconds to spend reaping background jobs before forcing SIGKILL.
+# Override via BACKGROUND_REAP_BUDGET env var (tests use small budgets).
+BACKGROUND_REAP_BUDGET="${BACKGROUND_REAP_BUDGET:-5}"
+
+kill_job_tree() {
+  # Walks descendants via pgrep -P (already used elsewhere in this script
+  # at L293/L929). Recursively terminates the whole subtree so the `tee`
+  # pipe inherited by any forked child is closed. Idempotent on dead PIDs.
+  local pid="${1:-}"
+  [ -z "$pid" ] && return 0
+  # Recurse into children first (kill leaves before root).
+  local child
+  for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+    kill_job_tree "$child"
+  done
+  # SIGTERM the parent (idempotent — already-dead PIDs are a no-op).
+  kill "$pid" 2>/dev/null || true
+}
+
+shutdown_background_jobs() {
+  # Reap the known background PIDs with a bounded reap budget. Idempotent —
+  # safe to call from both the post-loop shutdown AND the cleanup() EXIT trap.
+  local budget="${BACKGROUND_REAP_BUDGET}"
+  local t0=$(date +%s)
+  log "[SHUTDOWN] Reaping background jobs (budget=${budget}s)"
+
+  # Phase 1: tree-kill both known PIDs (SIGTERM cascades to descendants).
+  kill_job_tree "${HEARTBEAT_PID:-}"
+  kill_job_tree "${STEP_WATCHER_PID:-}"
+
+  # Phase 2: bounded reap — poll `kill -0` until both are gone or budget
+  # is exhausted. `wait` is a bash builtin (cannot be wrapped by `timeout`);
+  # a polling loop with `kill -0` is the canonical bounded-wait idiom.
+  local hb_alive=0
+  local sw_alive=0
+  while :; do
+    hb_alive=0
+    sw_alive=0
+    [ -n "${HEARTBEAT_PID:-}" ] && kill -0 "$HEARTBEAT_PID" 2>/dev/null && hb_alive=1
+    [ -n "${STEP_WATCHER_PID:-}" ] && kill -0 "$STEP_WATCHER_PID" 2>/dev/null && sw_alive=1
+    if [ "$hb_alive" -eq 0 ] && [ "$sw_alive" -eq 0 ]; then
+      local elapsed=$(( $(date +%s) - t0 ))
+      log "[SHUTDOWN] Background jobs reaped in ${elapsed}s"
+      return 0
+    fi
+    local now=$(date +%s)
+    if [ $(( now - t0 )) -ge "$budget" ]; then
+      break
+    fi
+    sleep 0.2
+  done
+
+  # Phase 3: budget exhausted — SIGKILL stragglers (defense-in-depth;
+  # current children honor SIGTERM so this rarely fires, but the contract
+  # must hold against future stubborn children).
+  log "[SHUTDOWN] Reap budget ${budget}s exhausted — SIGKILL stragglers"
+  [ -n "${HEARTBEAT_PID:-}" ] && kill -9 "$HEARTBEAT_PID" 2>/dev/null || true
+  [ -n "${STEP_WATCHER_PID:-}" ] && kill -9 "$STEP_WATCHER_PID" 2>/dev/null || true
+  sleep 0.2
+  log "[SHUTDOWN] Complete"
+  return 0
+}
+
 # ── Cleanup trap: on any exit, return to master + remove in-progress label ──────
 TRAPPED_ISSUE=""
 STASH_CREATED=0   # set to 1 by recover_clean_state() when it stashes; restored by cleanup()
 cleanup() {
   local EXIT_CODE=$?
+  # Defect 3 (#312): deterministically reap background jobs so the `tee`
+  # pipe is closed and the script can exit cleanly. Replaces the old bare
+  # `kill` (which orphaned `sleep` children and kept `tee` writing phantom
+  # heartbeats for hours — see issue #312). Idempotent.
+  shutdown_background_jobs
   # Kill only THIS PROJECT'S orphan pi/timeout processes (not system-wide!)
   # Use PID tracking to avoid killing other projects' pi processes
   if [ -n "${PI_PID:-}" ]; then
@@ -150,14 +244,6 @@ cleanup() {
     timeout_pid=$(ps -o ppid= -p "$PI_PID" 2>/dev/null | tr -d ' ')
     [ -n "$timeout_pid" ] && kill "$timeout_pid" 2>/dev/null || true
   fi
-  # Kill step_timeout_watcher background for this script only
-  if [ -n "${STEP_WATCHER_PID:-}" ]; then
-    kill "$STEP_WATCHER_PID" 2>/dev/null || true
-  fi
-  if [ -n "${HEARTBEAT_PID:-}" ]; then
-    kill "$HEARTBEAT_PID" 2>/dev/null || true
-  fi
-  sleep 1
   if [ $EXIT_CODE -ne 0 ] && [ -n "$TRAPPED_ISSUE" ]; then
     log "Cleanup trap: removing in-progress label from #$TRAPPED_ISSUE"
     "$GH_BIN" issue edit "$TRAPPED_ISSUE" --repo "$REPO" --remove-label "in-progress" 2>/dev/null || true
@@ -375,13 +461,11 @@ while true; do
 
   if [ -n "$AUTO_SHIP_META_REASON" ]; then
     log "[PREFLIGHT-BLOCK] issue #$ISSUE_NUMBER: $AUTO_SHIP_META_REASON — downgrading to human-review and writing DLQ entry"
-    "$GH_BIN" issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "in-progress" \
-      --remove-label "spec-approved" \
-      --remove-label "spec-ready" \
-      --add-label "human-review" 2>/dev/null || true
+    # Refactored to shared helper in #265 — argv shape preserved byte-for-byte
+    # (VC-4 / VC-6 of extract-duplicate-dequeue-logic-label-helper.usva.md).
+    bash "$PROJECT_DIR/scripts/with-dequeue.sh" human-review "$ISSUE_NUMBER"
     "$GH_BIN" issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "🛑 Auto-ship pre-flight detected meta-action issue ($AUTO_SHIP_META_REASON). Downgraded to \`human-review\`. Ship aborted before pi orchestrator. See #254." 2>/dev/null || true
+      --body "🛑 Auto-ship pre-flight detected meta-action issue ($AUTO_SHIP_META_REASON). Downgraded to \`human-review\". Ship aborted before pi orchestrator. See #254." 2>/dev/null || true
     write_dlq "cron-auto-ship-meta-action" "$AUTO_SHIP_META_REASON (issue #$ISSUE_NUMBER; spec-writer regression or mis-tag)" "$ISSUE_NUMBER" 2>/dev/null || true
     SKIPPED_ISSUES="$SKIPPED_ISSUES $ISSUE_NUMBER"
     TRAPPED_ISSUE=""
@@ -812,6 +896,12 @@ PI_PROMPT
       SHIP_MODEL="$FALLBACK_MOD"
 
       HEARTBEAT_SENTINEL="/tmp/pi-done-${ISSUE_NUMBER}-$$"
+      # Defect 1 (#312): kill the PRIOR heartbeat/watcher tree BEFORE
+      # reassigning the PID variables — otherwise the first background
+      # subshell is orphaned with no remaining reference, its `sleep`
+      # child keeps the `tee` pipe open, and the script can't exit.
+      kill_job_tree "$HEARTBEAT_PID"
+      kill_job_tree "$STEP_WATCHER_PID"
       start_heartbeat "$HEARTBEAT_SENTINEL" &
       HEARTBEAT_PID=$!
       step_timeout_watcher "$PI_OUTPUT_FILE" "$PI_STEP_TIMEOUT" "$HEARTBEAT_SENTINEL" "" "" &
@@ -843,8 +933,8 @@ PI_PROMPT_RETRY
       PI_PID=$!
       wait $PI_PID 2>/dev/null && EXIT_CODE=0 || EXIT_CODE=$?
       touch "$HEARTBEAT_SENTINEL" 2>/dev/null || true
-      kill "$HEARTBEAT_PID" 2>/dev/null || true
-      kill "$STEP_WATCHER_PID" 2>/dev/null || true
+      kill_job_tree "$HEARTBEAT_PID"
+      kill_job_tree "$STEP_WATCHER_PID"
       rm -f "$HEARTBEAT_SENTINEL" 2>/dev/null || true
       log "[FALLBACK-RETRY] Fallback attempt completed with exit code $EXIT_CODE"
     fi
@@ -853,13 +943,11 @@ PI_PROMPT_RETRY
   # Signal heartbeat and step-timeout watcher to stop (sentinel file)
   touch "$HEARTBEAT_SENTINEL" 2>/dev/null || true
 
-  # Kill heartbeat and step-timeout watcher on pi exit (safety net — sentinel should stop them naturally)
-  if [ -n "$HEARTBEAT_PID" ]; then
-    kill "$HEARTBEAT_PID" 2>/dev/null || true
-  fi
-  if [ -n "$STEP_WATCHER_PID" ]; then
-    kill "$STEP_WATCHER_PID" 2>/dev/null || true
-  fi
+  # Tree-kill heartbeat and step-timeout watcher on pi exit (safety net —
+  # sentinel should stop them naturally, but tree-kill guarantees the
+  # `sleep` children are also reaped so the `tee` pipe closes — #312).
+  kill_job_tree "$HEARTBEAT_PID"
+  kill_job_tree "$STEP_WATCHER_PID"
   rm -f "$HEARTBEAT_SENTINEL" 2>/dev/null || true
 
   # ── Extract final response from JSONL ──────────────────────────────────────
@@ -1009,11 +1097,9 @@ if final_text:
     # spec-ready when approving — remove both, forward-compatible with
     # #215's queue-label migration.
     log "Dequeueing issue #$ISSUE_NUMBER — shipped label applied"
-    "$GH_BIN" issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --add-label shipped \
-      --remove-label spec-approved \
-      --remove-label spec-ready \
-      --remove-label in-progress 2>/dev/null || true
+    # Refactored to shared helper in #265 — argv shape preserved byte-for-byte
+    # (VC-5 / VC-6 of extract-duplicate-dequeue-logic-label-helper.usva.md).
+    bash "$PROJECT_DIR/scripts/with-dequeue.sh" ship "$ISSUE_NUMBER"
   else
     log "Issue #$ISSUE_NUMBER — pi exited with code $EXIT_CODE"
     "$GH_BIN" issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "in-progress" 2>&1 || true
@@ -1033,5 +1119,13 @@ done  # ── end queue loop
 log "════════════════════════════════════════"
 log "  AUTO-SHIP CRON COMPLETE — Shipped: $SHIPPED_COUNT"
 log "════════════════════════════════════════"
+
+# Defect 3 (#312): explicit bounded shutdown before exit so the script
+# provably cannot block on a stray background child holding the `tee` pipe.
+# The cleanup() EXIT trap will also call this on its path, but calling it
+# here covers the happy path explicitly (the issue's suggested fix) and
+# keeps the shutdown idempotent. Without this, the main bash was observed
+# parked in kernel `do_wait` for hours after the run was logically complete.
+shutdown_background_jobs
 
 exit $EXIT_CODE

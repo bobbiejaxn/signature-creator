@@ -26,15 +26,11 @@ fi
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
 
-# Derive REPO from PROJECT_REPO if not already set
-REPO="${REPO:-${PROJECT_REPO#*://}}"  # Strip protocol prefix if present
-REPO="${REPO#github.com/}"  # Strip github.com/ prefix if present
-
 LOG_DIR="$PROJECT_DIR/logs/cron"
 RUN_ID="autoship-$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/${RUN_ID}.log"
 PID_FILE="$LOG_DIR/autoship.pid"
-LOCKFILE="/tmp/autoship-${PROJECT_NAME}.lock"
+LOCKFILE="/tmp/autoship-natursteinvertrieb.lock"
 
 DURATION_HOURS="${AUTOSHIP_DURATION_HOURS:-6}"
 POLL_INTERVAL_SECONDS="${AUTOSHIP_POLL_INTERVAL:-300}"
@@ -58,24 +54,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Lockfile guard: prevent concurrent autoship wrapper loops ─────────────
-# Atomic flock-based lock (fixes TOCTOU race, #205). The old guard used a
-# non-atomic check-then-rm-then-write pattern: 3 overlapping cron ticks
-# (02:00/02:30/03:00) all read an empty/stale lockfile, all removed and
-# overwrote it, and all proceeded to spawn orchestrators → duplicate issue
-# assignment + file-write races. flock -n acquires atomically or fails — there
-# is no intermediate state where two processes believe they hold the lock.
-# flock auto-releases on process exit (normal/SIGTERM/SIGINT/crash), so NO
-# rm-on-EXIT trap is needed (or wanted: unlinking mid-exit would let a later
-# opener create a fresh inode and bypass this holder).
 acquire_lock() {
-  exec 200>>"$LOCKFILE"
-  if ! flock -n 200; then
+  if [ -f "$LOCKFILE" ]; then
     local old_pid
-    old_pid=$(cat "$LOCKFILE" 2>/dev/null || echo "unknown")
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] SKIP autoship already running (PID $old_pid)"
-    exit 0
+    old_pid=$(cat "$LOCKFILE" 2>/dev/null || echo "")
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] SKIP autoship already running (PID $old_pid)"
+      exit 0
+    fi
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Stale lockfile detected (PID $old_pid not running) — removing"
+    rm -f "$LOCKFILE"
   fi
-  echo $$ > "$LOCKFILE"   # advisory diagnostic only; the lock is the kernel flock
+  echo $$ > "$LOCKFILE"
+  # EXIT trap cleans up the lockfile on normal exit, SIGTERM, or SIGINT
+  trap 'rm -f "$LOCKFILE" 2>/dev/null || true' EXIT
 }
 
 # -- Foreground vs background ──────────────────────────────────────────────────
