@@ -207,7 +207,7 @@ recover_clean_state() {
   if ! git diff --quiet || ! git diff --cached --quiet; then
     # Commit .learnings if that's all that's dirty
     DIRTY_FILES=$(git diff --name-only; git diff --cached --name-only)
-    ONLY_LEARNINGS=$(echo "$DIRTY_FILES" | grep -v "^\.learnings/" | wc -l | tr -d ' ')
+    ONLY_LEARNINGS=$(echo "$DIRTY_FILES" | { grep -v "^\.learnings/" || true; } | wc -l | tr -d ' ')
 
     if [ "$ONLY_LEARNINGS" -eq 0 ]; then
       git add .learnings/
