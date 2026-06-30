@@ -5,6 +5,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Source safe crontab helpers (#241 fleet-sync from natursteinvertrieb).
+# The unsafe pipeline `crontab -l | grep -v MARKER || true | crontab -`
+# silently wipes the crontab when MARKER does not match any line —
+# `crontab_remove_line` early-returns instead, leaving every unrelated
+# entry byte-identical.
+# shellcheck source=lib/crontab-helpers.sh
+source "$SCRIPT_DIR/lib/crontab-helpers.sh"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Load project config
@@ -19,7 +27,10 @@ source "$CONFIG_FILE"
 BEFORE=$(crontab -l 2>/dev/null | wc -l | tr -d ' ')
 
 # Remove our entries
-(crontab -l 2>/dev/null | grep -v "cron-spec-writer.sh" | grep -v "cron-auto-ship.sh" | grep -v "pi_launchpad autoship" || true) | crontab -
+
+crontab_remove_line "cron-auto-ship.sh"
+crontab_remove_line "cron-spec-writer.sh"
+crontab_remove_line "pi_launchpad autoship"
 
 AFTER=$(crontab -l 2>/dev/null | wc -l | tr -d ' ')
 

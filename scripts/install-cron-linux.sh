@@ -6,6 +6,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Source safe crontab helpers (#241 fleet-sync from natursteinvertrieb).
+# The unsafe pipeline `crontab -l | grep -v MARKER || true | crontab -`
+# silently wipes the crontab when MARKER does not match any line —
+# `crontab_remove_line` early-returns instead, leaving every unrelated
+# entry byte-identical.
+# shellcheck source=lib/crontab-helpers.sh
+source "$SCRIPT_DIR/lib/crontab-helpers.sh"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Load project config
@@ -38,7 +46,9 @@ CRON_PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 # -- Remove old entries if they exist ──────────────────────────────────────────
 MARKER="# pi_launchpad autoship-${PROJECT_NAME}"
-(crontab -l 2>/dev/null | grep -v "cron-spec-writer.sh" | grep -v "cron-auto-ship.sh" || true) | crontab -
+
+crontab_remove_line "cron-auto-ship.sh"
+crontab_remove_line "cron-spec-writer.sh"
 
 # -- Add new entries ──────────────────────────────────────────────────────────
 # Spec writer: 9 PM daily (UTC — adjust for VPS timezone)
