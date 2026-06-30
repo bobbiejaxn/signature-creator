@@ -340,19 +340,11 @@ while true; do
 
   export ISSUE_NUMBER=$("$GH_BIN" issue list \
     --repo "$REPO" \
-    --label spec-approved \
+    --search 'label:spec-ready,spec-approved -label:in-progress -label:shipped -label:blocker -label:human-review' \
     --state open \
-    --json number,labels \
+    --json number \
     --limit 10 \
-    --jq '[.[] | select(
-      (.labels | map(.name) | contains(["in-progress"]) | not) and
-      (.labels | map(.name) | contains(["shipped"]) | not) and
-      # spec-hold filter REMOVED 2026-06-09 per MG: no human review bottleneck
-      (.labels | map(.name) | contains(["blocker"]) | not) and
-      # human-review filter (#254): a meta-action issue that was routed by
-      # cron-spec-writer.sh is never re-picked as a ship candidate.
-      (.labels | map(.name) | contains(["human-review"]) | not)
-    ) | .number] | first // empty' 2>/dev/null)
+    --jq '.[0].number // empty' 2>/dev/null || true)
 
   if [ -z "$ISSUE_NUMBER" ]; then
     log "No more spec-approved issues in queue. Done. (Shipped: $SHIPPED_COUNT)"
