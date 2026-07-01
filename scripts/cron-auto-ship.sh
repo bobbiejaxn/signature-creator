@@ -28,6 +28,40 @@ export PROJECT_DIR="$(cd "$SCRIPT_DIR" && while [ "$(pwd)" != "/" ]; do [ -f ".p
 # Load project config
 source "$PROJECT_DIR/.pi/config.sh"
 
+# -- Meta-action detector (#256 shared helper) ----------------------------------
+# Source the shared meta-action detector (scripts/lib/meta-action-detect.sh).
+# Both .pi/scripts/cron-spec-writer.sh and .pi/scripts/cron-auto-ship.sh source
+# the SAME helper so the three signal classes (MG ACTION: title, body phrases,
+# {out-of-scope|blocker|human-review} label) live in ONE place. The helper
+# exports `meta_action_detect(title, body, labels_csv)` which returns the
+# reason string (empty if no detection). Routing logic (`+human-review`,
+# `-spec-approved`, DLQ write) stays in the caller — the helper only detects.
+# Path is keyed off $PROJECT_DIR (project-root), so the call resolves
+# correctly from BOTH the canonical scripts/ copy AND the fleet-distributed
+# .pi/scripts/ copy. See USVA #256 / VC-6.
+# shellcheck source=../../scripts/lib/meta-action-detect.sh
+source "$PROJECT_DIR/scripts/lib/meta-action-detect.sh"
+
+# -- Meta-action gate self-test (#255) — source helper only ────────────────────
+# Source the self-test helper here so the cron-side wrapper block (below) can
+# call _meta_gate_self_test_counter_inc + run_meta_gate_self_test once LOG_DIR
+# and log() are defined. The actual counter-increment + run-meta-gate call is
+# placed after the LOG_DIR / log() definitions (search for "META-GATE-SELF-TEST
+# fire" in this file). See #255 / VC-F1.
+# shellcheck source=../../scripts/lib/meta-action-self-test.sh
+source "$PROJECT_DIR/scripts/lib/meta-action-self-test.sh"
+# Per-cron-run counter: incremented atomically; the modulo of
+# META_GATE_SELF_TEST_EVERY decides whether this run fires the self-test.
+# Separate counter per cron (see VC-F6) so each cron's modulo-N boundary
+# fires independently.
+export SELF_TEST_STATE_DIR="$PROJECT_DIR/.pi/state"
+# Path is keyed off .pi/state/cron-auto-ship-run-count so it appears verbatim
+# in the cron script (audit-grep friendly per VC-F6).
+export SELF_TEST_COUNTER="$PROJECT_DIR/.pi/state/cron-auto-ship-run-count"
+mkdir -p "$SELF_TEST_STATE_DIR"
+export SELF_TEST_RUN_COUNT=$(_meta_gate_self_test_counter_inc "$SELF_TEST_COUNTER")
+export SELF_TEST_EVERY="${META_GATE_SELF_TEST_EVERY:-100}"
+
 
 # Auto-detect default branch (works for both main and master repos)
 export DEFAULT_BRANCH="$(cd "$PROJECT_DIR" && git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}' || echo main)"
@@ -51,21 +85,23 @@ check_dlq_retry_limit() {
   # Count DLQ entries for this issue (filenames contain project-issue_number)
   local dlq_count=$(find "$DLQ_DIR" -maxdepth 1 -name "*-${project_name}-${issue_num}*" 2>/dev/null | wc -l)
   if [ "$dlq_count" -ge "$DLQ_MAX_RETRIES" ]; then
-    log "[DLQ-LIMIT] Issue #$issue_num has $dlq_count failed attempts (limit: $DLQ_MAX_RETRIES). Moving to spec-hold."
-    # Dual-removal (#216, #261): spec-writer adds BOTH spec-approved AND
-    # spec-ready when approving a spec. Dequeue must clear every queue label
-    # the query could match on, otherwise the issue re-enters the queue
-    # under search eventual-consistency or future query-label migration (#215).
-    # gh --remove-label is idempotent — safe on already-absent labels.
-    # Refactored to shared helper in #265 — argv shape preserved byte-for-byte
-    # (VC-2 / VC-6 of extract-duplicate-dequeue-logic-label-helper.usva.md).
-    bash "$PROJECT_DIR/scripts/with-dequeue.sh" hold "$issue_num"
-    "$GH_BIN" issue comment "$issue_num" --repo "$REPO" --body "⚠️ Auto-ship paused: $dlq_count consecutive failures. Moved to \`spec-hold\`. Needs human review before re-queueing. Last errors in DLQ." 2>/dev/null || true
+    # Closed-loop policy (2026-07-01): no human triage. After max retries,
+    # log the failure to the single fleet tracker (pi_launchpad) and close
+    # the stuck project issue so the queue drains instead of looping forever.
+    # Closing (state=closed) removes it from the open queue entirely, so no
+    # label-clearing helper is needed here — unlike the old spec-hold park.
+    log "[DLQ-LIMIT] Issue #$issue_num has $dlq_count failed attempts (limit: $DLQ_MAX_RETRIES). Logging to pi_launchpad and closing."
+    "$GH_BIN" issue create --repo bobbiejaxn/pi_launchpad \
+      --title "[auto-ship-failed] ${PROJECT_NAME} #$issue_num gave up after $dlq_count attempts" \
+      --body "Origin repo: ${REPO}\nIssue: #${issue_num}\nProject: ${PROJECT_NAME}\n\nFailed repeatedly in cron-auto-ship. DLQ entries moved to dead folder. Re-open or re-file in the origin repo if this is real product work that deserves another attempt." \
+      --label "fleet-meta,automated" 2>/dev/null || true
+    "$GH_BIN" issue close "$issue_num" --repo "$REPO" --reason "not planned" \
+      --comment "Auto-ship gave up after $dlq_count attempts (closed-loop policy: no human triage). Failure logged to bobbiejaxn/pi_launchpad." 2>/dev/null || true
     # Move DLQ entries to dead folder
     for f in "$DLQ_DIR"/*-${project_name}-${issue_num}*; do
       [ -f "$f" ] && mv "$f" "$DLQ_DEAD_DIR/" 2>/dev/null || true
     done
-    return 0  # Issue was handled (moved to hold)
+    return 0  # Issue was handled (closed + logged)
   fi
   return 1  # Issue has not exceeded limit, can proceed
 }
@@ -116,6 +152,20 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 log "════════════════════════════════════════"
 log "  AUTO-SHIP CRON — $(date)"
 log "════════════════════════════════════════"
+
+# -- META-GATE-SELF-TEST fire (#255) ────────────────────────────────────────────
+# Now that log() and $LOG_DIR are defined, evaluate the modulo-N boundary and
+# either fire the self-test or log the skip. The counter was incremented at
+# the top of the script (right after the helper source line); SELF_TEST_RUN_COUNT
+# and SELF_TEST_EVERY are in scope here.
+export SELF_TEST_VERDICT_LOG="$LOG_DIR/self-test-$(date +%Y%m%d-%H%M%S).log"
+if [ "$((SELF_TEST_RUN_COUNT % SELF_TEST_EVERY))" -eq 0 ]; then
+  log "[META-GATE-SELF-TEST] firing self-test (run $SELF_TEST_RUN_COUNT modulo $SELF_TEST_EVERY == 0)"
+  run_meta_gate_self_test "$SELF_TEST_RUN_COUNT" "cron-auto-ship" "$SELF_TEST_VERDICT_LOG" || \
+    log "[META-GATE-SELF-TEST] self-test returned non-zero — see $SELF_TEST_VERDICT_LOG (cron run continues)"
+else
+  log "[META-GATE-SELF-TEST] skipping (run $SELF_TEST_RUN_COUNT modulo $SELF_TEST_EVERY != 0)"
+fi
 
 cd "$PROJECT_DIR"
 
@@ -296,9 +346,20 @@ recover_clean_state() {
     ONLY_LEARNINGS=$(echo "$DIRTY_FILES" | { grep -v "^\.learnings/" || true; } | wc -l | tr -d ' ')
 
     if [ "$ONLY_LEARNINGS" -eq 0 ]; then
-      git add .learnings/
-      git commit -m "chore: learnings from previous auto-ship session"
-      log "Committed dirty learnings on master — tree now clean"
+      # Use `git add -u` (only stages tracked-file modifications) instead of
+      # `git add .learnings/` so the recovery step silently tolerates the
+      # gitignored path (issue #174). `.learnings/` is listed in .gitignore
+      # so `git add .learnings/` errors out in environments where the file is
+      # not pre-tracked, which previously caused the post-ship recovery step
+      # to exit non-zero and mask successful ships in cron health.
+      # `2>/dev/null || true` neutralizes any residual git error.
+      git add -u 2>/dev/null || true
+      if git diff --cached --quiet -- .learnings/ 2>/dev/null; then
+        : # nothing tracked under .learnings/ to commit — leave the rest alone
+      else
+        git commit -m "chore: learnings from previous auto-ship session" 2>/dev/null || true
+        log "Committed dirty learnings on master — tree now clean"
+      fi
     else
       # Unknown dirty files — stash to preserve work, don't abort
       log "Stashing uncommitted changes to clean working tree..."
@@ -415,40 +476,41 @@ while true; do
   log "Issue: $ISSUE_TITLE"
   log "Slug:  $FEATURE_SLUG"
 
-  # ── Meta-action pre-flight gate (#254) ──────────────────────────────────────
+  # ── Meta-action pre-flight gate (#254, refactored to shared helper in #256) ──
   # Defense-in-depth: re-check the same three signal classes from
   # cron-spec-writer.sh (MG ACTION: title / CEO-cannot-do-this &c. body /
-  # out-of-scope|blocker|human-review label set) immediately before the pi
-  # orchestrator is invoked. Matches are routed to `human-review` (NOT
-  # `blocker`), spec-approved is removed, a DLQ entry is written so the
-  # issue does not enter a tight retry loop, and the loop continues to the
-  # next candidate. Idempotent: an already-correctly-labelled human-review
-  # issue short-circuits before any label churn (no DLQ, no transition).
-  # See #254.
-  AUTO_SHIP_META_REASON=""
-  # Signal 1: title matches /^MG ACTION:/i
-  if echo "$ISSUE_TITLE" | grep -qiE '^MG ACTION:'; then
-    AUTO_SHIP_META_REASON="title matches /MG ACTION:/i"
-  fi
-  # Signal 2: body matches a meta-action phrase (case-insensitive)
-  if [ -z "$AUTO_SHIP_META_REASON" ] && \
-     echo "$ISSUE_CONTENT" | grep -qiE 'CEO cannot do this|requires MG decision|DATA PROTECTION RULE'; then
-    AUTO_SHIP_META_REASON="body matches meta-action phrase (CEO cannot do this / requires MG decision / DATA PROTECTION RULE)"
-  fi
-  # Signal 3: fetch labels once and inspect. human-review on the label set
-  # is the IDEMPOTENT no-op state (already correctly routed by the
-  # spec-writer layer — skip without DLQ). out-of-scope is a regression
-  # marker (a spec-writer bug — fire the gate + DLQ + transition).
+  # {out-of-scope|blocker|human-review} label set) via the shared helper
+  # from #256 immediately before the pi orchestrator is invoked. The
+  # detection itself lives in scripts/lib/meta-action-detect.sh — this
+  # block owns only the consumer-policy parts (NOOP short-circuit on the
+  # idempotent human-review label, regression-marker fallback for an
+  # out-of-scope label that reached here because of a spec-writer bug,
+  # plus the DLQ + label-mutation transition). See #254 (this gate),
+  # #247 (parent meta-action spec), #256 (helper extraction),
+  # #243 (the 2026-06-23 incident).
   AUTO_SHIP_LABELS=$("$GH_BIN" issue view "$ISSUE_NUMBER" --repo "$REPO" \
     --json labels --jq '.labels[].name' 2>/dev/null | tr '\n' ' ' || echo "")
-  if [ -z "$AUTO_SHIP_META_REASON" ] && echo "$AUTO_SHIP_LABELS" | grep -qw 'human-review'; then
+  AUTO_SHIP_LABELS_CSV=$(printf '%s' "$AUTO_SHIP_LABELS" | paste -sd ',' - 2>/dev/null || echo "")
+  # NOOP check: human-review already routed → idempotent skip without DLQ
+  # (consumer-policy — NOT part of the 3 signal classes). This stays in
+  # the caller per #256's "routing logic remains in the caller" framing.
+  if echo "$AUTO_SHIP_LABELS" | grep -qw 'human-review'; then
     log "[PREFLIGHT-NOOP] issue #$ISSUE_NUMBER already labelled human-review — no transition, no DLQ (idempotent)"
     SKIPPED_ISSUES="$SKIPPED_ISSUES $ISSUE_NUMBER"
     TRAPPED_ISSUE=""
     continue
   fi
+  # Detection via shared helper (#256) — three signal classes (title prefix,
+  # body phrase, marker label). Returns a reason string on match, empty
+  # otherwise. See scripts/lib/meta-action-detect.sh for the regexes.
+  AUTO_SHIP_META_REASON=$(meta_action_detect "$ISSUE_TITLE" "$ISSUE_CONTENT" "$AUTO_SHIP_LABELS_CSV")
+  # Regression marker (consumer-policy): an out-of-scope label reaching
+  # here means the spec-writer layer missed it (spec-writer's pre-filter
+  # excludes out-of-scope, so a straggler is a regression). Fire the
+  # gate + DLQ + transition. This is NOT part of the 3 signal classes per
+  # #256's spec — it's a cron-auto-ship.sh-specific consumer check.
   if [ -z "$AUTO_SHIP_META_REASON" ] && echo "$AUTO_SHIP_LABELS" | grep -qw 'out-of-scope'; then
-    AUTO_SHIP_META_REASON="issue labelled out-of-scope"
+    AUTO_SHIP_META_REASON="issue labelled out-of-scope (spec-writer regression)"
   fi
 
   if [ -n "$AUTO_SHIP_META_REASON" ]; then
@@ -844,12 +906,14 @@ the script has already done it. If the script says "Dequeueing issue
 Do NOT close the issue — the PR will auto-close it on merge (Closes #N in
 the PR description / commit message handles that).
 
-### Phase 8 — Capture out-of-scope ideas
-During implementation, the architect, implementer, and reviewer may surface ideas, edge cases, or adjacent improvements that are out of scope for this issue. Capture each one as a GitHub issue and label it backlog so it enters the next cron cycle.
+### Phase 8 — Capture out-of-scope ideas (closed-loop policy)
+During implementation, ideas may surface. Apply this routing strictly — it is what keeps the issue list free of self-generated noise:
 
-For each idea, run bash using ./scripts/create-issue.sh with flags: --type enhancement, --found-during set to the current issue title and number, plus --location, --symptom, --context, --affects. All flag values must be shell-quoted strings. After creating each issue, immediately run: ${GH_BIN} issue edit [new-number] --repo ${REPO} --add-label backlog
+- PRODUCT ideas (new features for the app/site this repo ships): file them in bobbiejaxn/pi_launchpad (NOT this repo), labeled `backlog`. Command:
+  ${GH_BIN} issue create --repo bobbiejaxn/pi_launchpad --title "[idea] <short>" --body "Found during ${PROJECT_NAME} #${ISSUE_NUMBER}: <one line>.\n\nOrigin repo: ${REPO}" --label "backlog,automated" 2>/dev/null || true
+- PIPELINE ideas (anything about cron-auto-ship, cron-spec-writer, run-ship, tests, CI, fleet scripts, the agent itself): DO NOT file an issue. Fix it inline now if trivial and in-scope, otherwise discard. Never file an issue about the shipping pipeline into any repo.
 
-If no ideas surfaced, skip this phase.
+Hard limit: file at most ONE idea per ship run. If zero product ideas surfaced, skip this phase. Never create issues in ${REPO} from this phase.
 
 ### Phase 9 — Log learnings
 Use the subagent tool:
