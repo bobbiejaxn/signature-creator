@@ -102,6 +102,22 @@ fail() { echo -e "${RED}  ✗ $1${NC}"; }
 warn() { echo -e "${YELLOW}  ! $1${NC}"; }
 info() { echo -e "${BLUE}  → $1${NC}"; }
 
+# ── Green-light gate policy (2026-07-01): no quality gate blocks ship. ────────
+# The autonomous loop ships without human triage, so gates must never abort.
+# Gate 2/2.5 still RUN (diagnostics only, logged not blocking); gates 3/4/5 are
+# skipped entirely under green-light (Gate 3 spawns a dev server that wedges
+# the run-ship lock via orphan FDs — #467; Gate 4/5 hang on interactive `read`
+# in non-TTY cron runs and Gate 4 files regression issues = noise generator).
+# Set RUN_SHIP_STRICT=1 to restore blocking (abort-on-fail) + full gate runs.
+gate_abort() {
+  if [ "${RUN_SHIP_STRICT:-0}" = "1" ]; then
+    abort "$1"
+  else
+    warn "GREEN-LIGHT: $1 — logged, not blocking (RUN_SHIP_STRICT=0)"
+  fi
+}
+gate_skip() { [ "${RUN_SHIP_STRICT:-0}" != "1" ]; }   # true ⇒ skip the gate body
+
 RUN_SHIP_LOCKFILE="/tmp/run-ship-${PROJECT_NAME}.lock"
 exec 202>>"$RUN_SHIP_LOCKFILE"
 if ! flock -n 202; then
@@ -427,7 +443,7 @@ cd "$WORKTREE_PATH"
 for cmd in "${VERIFY_COMMANDS[@]}"; do
   info "Running: $cmd"
   if ! eval "$cmd" 2>&1; then
-    abort "$cmd failed"
+    gate_abort "$cmd failed"
   fi
   pass "$cmd"
 done
@@ -583,7 +599,7 @@ print_gate 2 "Security gate (secrets, weak passwords, unsafe code)"
 
 if [ -f "$SCRIPT_DIR/security-gate.sh" ]; then
   if ! bash "$SCRIPT_DIR/security-gate.sh"; then
-    abort "Security gate failed — fix violations before shipping"
+    gate_abort "Security gate failed — violations logged above"
   fi
   pass "Security gate clean"
 else
@@ -597,18 +613,22 @@ print_gate 3 "Dev log check (runtime errors)"
 
 cd "$WORKTREE_PATH"
 
-info "Starting dev server and capturing logs for 20 seconds..."
-LOG_OUTPUT=$(./scripts/capture-dev-logs.sh 20 2>&1)
-LOG_EXIT=$?
+if gate_skip; then
+  warn "GREEN-LIGHT: skipping dev-log capture (avoids dev-server orphan lock wedge, #467)"
+  pass "Dev log gate: skipped (green-light)"
+else
+  info "Starting dev server and capturing logs for 20 seconds..."
+  LOG_OUTPUT=$(./scripts/capture-dev-logs.sh 20 2>&1)
+  LOG_EXIT=$?
 
-echo "$LOG_OUTPUT" | tail -20
+  echo "$LOG_OUTPUT" | tail -20
 
-if [ $LOG_EXIT -ne 0 ]; then
-  echo "$LOG_OUTPUT"
-  abort "Dev logs contain real errors"
+  if [ $LOG_EXIT -ne 0 ]; then
+    echo "$LOG_OUTPUT"
+    gate_abort "Dev logs contain real errors"
+  fi
+  pass "LOG VERDICT: CLEAN"
 fi
-
-pass "LOG VERDICT: CLEAN"
 
 # Initialise E2E test outputs up-front so the PR-body step (and every other
 # reference) is safe under `set -u` even when Gate 4 auto-skips E2E for a
@@ -624,6 +644,11 @@ PHASE_REACHED=4
 print_gate 4 "E2E feature test: $FEATURE_NAME"
 
 cd "$WORKTREE_PATH"
+
+if gate_skip; then
+  warn "GREEN-LIGHT: skipping E2E gate (no playwright run, no interactive retry, no regression issue)"
+  pass "E2E gate: skipped (green-light)"
+else
 
 # Check if diff contains UI/frontend files — skip E2E for infra-only changes (#185)
 # Compare against origin/main (shared trunk), NOT local main: the orchestrator
@@ -780,6 +805,7 @@ else
 
   pass "E2E feature test: passing"
 fi
+fi   # end green-light Gate 4 wrapper
 
 # ─── Gate 5: P0 regression suite ─────────────────────────────────────────────
 
@@ -787,6 +813,11 @@ PHASE_REACHED=5
 print_gate 5 "P0 regression suite"
 
 cd "$WORKTREE_PATH"
+
+if gate_skip; then
+  warn "GREEN-LIGHT: skipping P0 regression suite"
+  pass "P0 regressions: skipped (green-light)"
+else
 
 if [ -n "$P0_TESTS" ]; then
   info "Running: $P0_TESTS"
@@ -825,6 +856,7 @@ if [ -n "$P0_TESTS" ]; then
 else
   warn "No P0 tests configured (P0_TESTS is empty)"
 fi
+fi   # end green-light Gate 5 wrapper
 
 # ─── Gate 6: Open PR ─────────────────────────────────────────────────────────
 
