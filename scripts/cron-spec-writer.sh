@@ -36,6 +36,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR" && while [ "$(pwd)" != "/" ]; do [ -f ".pi/confi
 
 CONFIG_FILE="$PROJECT_DIR/.pi/config.sh"
 if [ -f "$CONFIG_FILE" ]; then
+  unset REPO PROJECT_REPO  # issue #150: config.sh is source of truth; kill leaked env vars
   source "$CONFIG_FILE"
 else
   echo "ERROR: No .pi/config.sh found. Run setup first."
@@ -104,7 +105,7 @@ ISSUES=$("$GH_BIN" issue list \
     (.labels | map(.name) | contains(["shipped"]) | not) and
     (.labels | map(.name) | contains(["blocker"]) | not) and
     (.labels | map(.name) | contains(["human-review"]) | not)
-  ) | .number] | .[]' 2>/dev/null)
+  ) | .number] | .[]' 2>/dev/null) || ISSUES=""  # issue #162: prevent set -e silent exit on transient gh failure
 
 if [ -z "$ISSUES" ]; then
   log "No eligible backlog issues found. Exiting."
